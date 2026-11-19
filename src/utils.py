@@ -306,10 +306,58 @@ def load_json(path: Path):
 # Config loading
 # ---------------------------------------------------------------------------
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 def load_config(path: str | Path) -> dict:
-    """Load pipeline YAML config."""
+    """Load pipeline YAML config.
+
+    Supports ``extends: <other.yaml>`` (relative to this file) -- the parent
+    config is loaded first and this file's keys are deep-merged on top.
+    """
+    path = Path(path)
     with open(path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
+    parent = cfg.pop("extends", None)
+    if parent:
+        cfg = _deep_merge(load_config(path.parent / parent), cfg)
+    return cfg
+
+
+def app_root() -> Path:
+    """Root for relative model paths: /app inside the Docker image, else the repo root.
+
+    Override with the BASKETBALL360_ROOT environment variable.
+    """
+    import os
+    env = os.environ.get("BASKETBALL360_ROOT")
+    if env:
+        return Path(env)
+    if Path("/app").is_dir():
+        return Path("/app")
+    return Path(__file__).resolve().parents[1]
+
+
+def resolve_device(device: str | None) -> str:
+    """Resolve ``auto`` to cuda:0 / mps / cpu depending on what torch sees."""
+    if device and device != "auto":
+        return device
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda:0"
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps"
+    except ImportError:
+        pass
+    return "cpu"
 
 
 # ---------------------------------------------------------------------------

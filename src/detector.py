@@ -115,7 +115,8 @@ def _resolve_runtime_path(path_value: str) -> str:
     path_obj = Path(path_value)
     if path_obj.is_absolute():
         return str(path_obj)
-    return str(Path("/app") / path_obj)
+    from .utils import app_root
+    return str(app_root() / path_obj)
 
 
 def _v1_default_aliases(base_model_path: str) -> set[str]:
@@ -707,7 +708,8 @@ class Detector:
         self.foi_auto_min_conf = foi_cfg.get("auto_min_conf", 0.25)
         self._effective_center_yaw: float | None = None
 
-        self.device = getattr(self, "device", "cuda:0")
+        from .utils import resolve_device
+        self.device = resolve_device(getattr(self, "device", "auto"))
         self._model = None
         self._ball_model = None
         self._player_model = None

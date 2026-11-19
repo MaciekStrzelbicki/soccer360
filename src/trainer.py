@@ -95,7 +95,8 @@ class Trainer:
             candidate_paths.append(configured)
         else:
             candidate_paths.append(Path.cwd() / configured)
-            candidate_paths.append(Path("/app") / configured)
+            from .utils import app_root
+            candidate_paths.append(app_root() / configured)
 
         active_model = self.model_dir / "ball_best.pt"
         baked_default = Path("/app/models/yolo26l.pt")

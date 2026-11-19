@@ -49,9 +49,15 @@ def cli(ctx: click.Context, config: str):
     paths.setdefault("archive_raw", "/tank/archive_raw")
     paths.setdefault("logs", "/tank/logs")
 
-    Path("/scratch/work").mkdir(parents=True, exist_ok=True)
+    # Relative paths (local, non-Docker configs) -> absolute, so ffmpeg concat
+    # lists and worker processes resolve them regardless of their cwd.
+    for key, value in list(paths.items()):
+        if isinstance(value, str) and not Path(value).is_absolute():
+            paths[key] = str(Path(value).resolve())
+
+    Path(paths["scratch"]).mkdir(parents=True, exist_ok=True)
     Path(paths["stagging"]).mkdir(parents=True, exist_ok=True)
-    log_dir = Path("/tank/logs")
+    log_dir = Path(paths["logs"])
     log_dir.mkdir(parents=True, exist_ok=True)
     paths["logs"] = str(log_dir)
 

@@ -1,0 +1,3 @@
+extends: basketball.yaml
+reframer:
+  num_workers: 1

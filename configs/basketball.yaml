@@ -1,0 +1,117 @@
+# Basketball360 -- local (Mac / single GPU) config for indoor basketball.
+# Inherits everything from pipeline.yaml and overrides only what differs.
+#
+# Geometry assumption (calibrate on your footage!):
+#   Insta360 X5 at the half-court line on the sideline, ~1.5-2.5 m high,
+#   lens facing the court centre = yaw 0 in the exported equirect MP4.
+#   Court 28 x 15 m -> baselines at roughly yaw +/-80 deg, near-side players
+#   down to pitch ~-60 deg, hoops (3.05 m) slightly above the horizon.
+extends: pipeline.yaml
+
+paths:
+  ingest: ./data/ingest
+  scratch: ./data/scratch
+  processed: ./data/processed
+  highlights: ./data/highlights
+  models: ./data/models
+  labeling: ./data/labeling
+  stagging: ./data/stagging
+  archive_raw: ./data/archive_raw
+  logs: ./data/logs
+
+model:
+  path: ./data/models/yolo26m.pt
+  base_model: ./data/models/yolo26m.pt
+  backend: fp32
+
+detector:
+  runtime_override_path: ./data/state/ingest_model_selection.json
+  player_runtime_override_path: ./data/state/ingest_player_model_selection.json
+  ball_model_config_override_path: ./data/state/ball_model_config.json
+  player_model_path: ./data/models/yolo26m.pt
+  batch_size: 4
+
+detection:
+  path: ./data/models/yolo26m.pt
+  device: auto            # cuda:0 -> mps (Apple Silicon) -> cpu
+  half: false
+  img_size: 1920          # 3840 in upstream; halve for laptop speed
+  conf: 0.15
+  max_det: 60
+
+field_of_interest:
+  enabled: true
+  center_mode: fixed
+  center_yaw_deg: 0
+  yaw_window_deg: 200     # whole court incl. baselines/hoops from the sideline
+  pitch_min_deg: -60      # near-side players are well below the horizon
+  pitch_max_deg: 25
+
+filters:
+  min_y_frac: 0.30        # ~ pitch +36 deg
+  max_y_frac: 0.88        # ~ pitch -68 deg
+  max_jump_px: 300
+  max_speed_px_per_s: 3500   # passes / long rebounds are fast at this distance
+
+tracker:
+  max_speed_px_per_frame: 260
+  max_displacement_px: 380
+  max_bbox_area: 20000    # ball is much bigger when it passes near the camera
+
+camera:
+  max_pan_speed_deg_per_sec: 90.0
+  max_fast_pan_speed_deg_per_sec: 180.0   # fast breaks cross the court in ~3 s
+  default_fov: 100.0
+  min_fov: 80.0
+  max_fov: 120.0
+  field_center_pitch_deg: -15.0
+  deadband_deg: 3.0
+  lookahead_frames: 5
+  lookahead_max_deg: 15.0
+
+center_of_play:
+  # Ball is in someone's hands most of the time -> lean on the player cluster.
+  min_player_conf: 0.50
+  trim_fraction: 0.15
+  min_players: 4
+  ball_blend_weight: 0.35
+  low_conf_ball_blend_weight: 0.60
+  fast_ball_weight: 0.75
+  slow_ball_weight: 0.35
+  spread_max_fov: 120.0
+
+reframer:
+  output_resolution: [1920, 1080]
+  source_downscale: [3840, 1920]
+  num_workers: 6
+  tactical_fov: 150
+  tactical_pitch: -15.0
+
+highlights:
+  # "goal boxes" = areas around the two hoops (normalised x0,y0,x1,y1 in equirect)
+  goal_box_regions:
+    - [0.22, 0.30, 0.32, 0.55]
+    - [0.68, 0.30, 0.78, 0.55]
+  pre_margin_sec: 6.0
+  post_margin_sec: 3.0
+  max_clips: 30
+
+exporter:
+  codec: libx264
+  encoder: cpu
+  crf: 20
+  preset: veryfast
+
+ingest:
+  archive_on_success: false   # never move the source recording
+  archive_mode: leave
+  archive_dir: ./data/archive_raw
+
+active_learning:
+  export_dir: ./data/labeling
+
+dashboard:
+  db_path: ./data/state/dashboard.db
+
+logging:
+  file: ./data/logs/basketball360.log

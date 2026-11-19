@@ -105,7 +105,8 @@ class TrackNetV3Detector:
         self.input_width: int = tn_cfg.get("input_width", 512)
         self.heatmap_threshold: float = tn_cfg.get("heatmap_threshold", 0.5)
         self.peak_radius: int = tn_cfg.get("peak_radius", 5)
-        self.device: str = config.get("detection", {}).get("device", "cuda:0")
+        from .utils import resolve_device
+        self.device: str = resolve_device(config.get("detection", {}).get("device", "auto"))
         self._model = None
 
     # ------------------------------------------------------------------
