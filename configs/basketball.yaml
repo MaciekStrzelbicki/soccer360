@@ -101,6 +101,19 @@ center_of_play:
 reframer:
   output_resolution: [1920, 1080]
   source_downscale: [5760, 2880]   # 8K source; sharper when zoomed to ~62 deg
+  # Live scoreboard picture-in-picture, cut from the 360 frame each frame.
+  # yaw/pitch = scoreboard centre measured on the 8K frame (camera-specific).
+  scoreboard_overlay:
+    enabled: true
+    yaw: 8.2
+    pitch: 3.3
+    fov_h: 6.8            # deg of the 360 frame to cut
+    aspect: 1.9           # width / height of the cut
+    width_px: 380         # size on the 1920x1080 output
+    position: top-left    # top-left | top-right | bottom-left | bottom-right
+    margin_px: 24
+    border_px: 3
+    opacity: 1.0
   num_workers: 6
   tactical_fov: 150
   tactical_pitch: -15.0

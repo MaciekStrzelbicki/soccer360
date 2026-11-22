@@ -256,3 +256,52 @@ class TestReframerHardening:
             )
 
         assert list(tmp_path.glob("tactical_seg_*.mp4")) == []
+
+
+class TestScoreboardOverlay:
+    def _equirect_with_marker(self, w=720, h=360):
+        frame = np.zeros((h, w, 3), dtype=np.uint8)
+        # bright block around yaw=0, pitch=0 (image centre)
+        frame[h // 2 - 4:h // 2 + 4, w // 2 - 4:w // 2 + 4] = 255
+        return frame
+
+    def test_patch_size_and_content(self):
+        from src.reframer import _scoreboard_patch
+        ov = {"yaw": 0.0, "pitch": 0.0, "fov_h": 10.0, "aspect": 2.0,
+              "width_px": 200, "border_px": 2}
+        patch = _scoreboard_patch(self._equirect_with_marker(), ov)
+        assert patch.shape == (100 + 4, 200 + 4, 3)
+        assert patch.dtype == np.uint8
+        assert patch[52, 102].mean() > 200  # marker in the middle
+
+    def test_patch_elsewhere_is_dark(self):
+        from src.reframer import _scoreboard_patch
+        ov = {"yaw": 90.0, "pitch": 0.0, "fov_h": 10.0, "aspect": 2.0,
+              "width_px": 200, "border_px": 0}
+        patch = _scoreboard_patch(self._equirect_with_marker(), ov)
+        assert patch.max() < 30
+
+    @pytest.mark.parametrize("pos,corner", [
+        ("top-left", (10, 10)), ("top-right", (10, 289)),
+        ("bottom-left", (189, 10)), ("bottom-right", (189, 289)),
+    ])
+    def test_paste_positions(self, pos, corner):
+        from src.reframer import _paste_overlay
+        img = np.zeros((200, 300, 3), dtype=np.uint8)
+        patch = np.full((20, 30, 3), 255, dtype=np.uint8)
+        out = _paste_overlay(img, patch, {"position": pos, "margin_px": 10})
+        assert out[corner].mean() == 255
+        assert out.sum() == patch.sum()
+
+    def test_paste_too_big_is_noop(self):
+        from src.reframer import _paste_overlay
+        img = np.zeros((50, 50, 3), dtype=np.uint8)
+        patch = np.full((60, 60, 3), 255, dtype=np.uint8)
+        assert _paste_overlay(img, patch, {}).sum() == 0
+
+    def test_reframer_reads_config(self, test_config):
+        from src.reframer import Reframer
+        assert Reframer(test_config).scoreboard_overlay is None
+        test_config["reframer"]["scoreboard_overlay"] = {
+            "enabled": True, "yaw": 1.0, "pitch": 2.0, "fov_h": 5.0}
+        assert Reframer(test_config).scoreboard_overlay["yaw"] == 1.0

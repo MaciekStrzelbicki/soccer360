@@ -29,6 +29,63 @@ from .utils import (
 logger = logging.getLogger("soccer360.reframer")
 
 
+def _scoreboard_patch(frame: np.ndarray, ov: dict) -> np.ndarray:
+    """Cut a fixed rectilinear view (e.g. the scoreboard) out of a 360 frame.
+
+    Sampled at roughly native source resolution, then upscaled to
+    ``width_px`` with bicubic interpolation (sharper than sampling big).
+    """
+    src_w = frame.shape[1]
+    fov_h = float(ov["fov_h"])
+    aspect = float(ov.get("aspect", 16 / 9))
+    native_w = max(16, int(round(src_w * fov_h / 360.0)))
+    native_h = max(8, int(round(native_w / aspect)))
+    fov_v = math.degrees(
+        2 * math.atan(math.tan(math.radians(fov_h / 2)) / aspect)
+    )
+    patch = py360convert.e2p(
+        frame,
+        fov_deg=(fov_h, fov_v),
+        u_deg=float(ov["yaw"]),
+        v_deg=float(ov["pitch"]),
+        out_hw=(native_h, native_w),
+        mode="bilinear",
+    )
+    out_w = int(ov.get("width_px", 360))
+    out_h = max(1, int(round(out_w / aspect)))
+    patch = cv2.resize(
+        np.clip(patch, 0, 255).astype(np.uint8), (out_w, out_h),
+        interpolation=cv2.INTER_CUBIC,
+    )
+    border = int(ov.get("border_px", 3))
+    if border > 0:
+        patch = cv2.copyMakeBorder(
+            patch, border, border, border, border,
+            cv2.BORDER_CONSTANT, value=(20, 20, 20),
+        )
+    return patch
+
+
+def _paste_overlay(img: np.ndarray, patch: np.ndarray, ov: dict) -> np.ndarray:
+    """Paste ``patch`` into a corner of ``img`` (opacity-blended)."""
+    h, w = img.shape[:2]
+    ph, pw = patch.shape[:2]
+    m = int(ov.get("margin_px", 24))
+    if ph + m > h or pw + m > w:
+        return img
+    pos = ov.get("position", "top-left")
+    y0 = m if pos.startswith("top") else h - ph - m
+    x0 = m if pos.endswith("left") else w - pw - m
+    out = np.clip(img, 0, 255).astype(np.uint8)
+    alpha = float(ov.get("opacity", 1.0))
+    region = out[y0:y0 + ph, x0:x0 + pw]
+    if alpha >= 1.0:
+        region[:] = patch
+    else:
+        region[:] = cv2.addWeighted(patch, alpha, region, 1.0 - alpha, 0)
+    return out
+
+
 def _render_segment(
     video_path: str,
     camera_entries: list[dict],
@@ -43,6 +100,7 @@ def _render_segment(
     preset: str,
     output_path: str,
     overlap_frames: int = 0,
+    overlay: dict | None = None,
 ):
     """Render a range of frames as a video segment. Runs in worker process.
 
@@ -100,6 +158,10 @@ def _render_segment(
 
             # Skip overlap warmup frames
             if i >= skip_count:
+                if overlay:
+                    perspective = _paste_overlay(
+                        perspective, _scoreboard_patch(frame, overlay), overlay
+                    )
                 writer.write(perspective)
                 written += 1
     finally:
@@ -200,6 +262,9 @@ class Reframer:
         self.tactical_yaw = ref_cfg.get("tactical_yaw", 0.0)
         self.tactical_pitch = ref_cfg.get("tactical_pitch", -5.0)
         self.overlap_sec = ref_cfg.get("overlap_sec", 0.5)
+        # Picture-in-picture of a fixed region of the 360 frame (scoreboard).
+        ov = ref_cfg.get("scoreboard_overlay") or {}
+        self.scoreboard_overlay = dict(ov) if ov.get("enabled", False) else None
 
         self.codec = exp_cfg.get("codec", "libx264")
         self.crf = exp_cfg.get("crf", 18)
@@ -277,6 +342,7 @@ class Reframer:
                         self.preset,
                         str(seg_path),
                         overlap_frames if i > 0 else 0,
+                        self.scoreboard_overlay,
                     ))
                     offset += n
 

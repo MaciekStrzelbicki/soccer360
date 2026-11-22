@@ -128,6 +128,12 @@ reframer:
   interpolation: bilinear
   # Seconds of overlap at segment boundaries for codec warmup (clean cuts)
   overlap_sec: 0.5
+  # Picture-in-picture of a fixed region of the 360 frame (e.g. scoreboard)
+  # on the broadcast output. Keys: yaw, pitch, fov_h, aspect, width_px,
+  # position (top-left|top-right|bottom-left|bottom-right), margin_px,
+  # border_px, opacity.
+  scoreboard_overlay:
+    enabled: false
   tactical_fov: 120
   tactical_yaw: 0.0
   tactical_pitch: -5.0

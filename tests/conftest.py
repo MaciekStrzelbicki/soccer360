@@ -123,6 +123,7 @@ def test_config() -> dict:
                 "tactical_fov": 120,
                 "tactical_yaw": 0.0,
                 "tactical_pitch": -5.0,
+                "scoreboard_overlay": {"enabled": False},
             },
             "highlights": {
                 "speed_percentile": 95,
