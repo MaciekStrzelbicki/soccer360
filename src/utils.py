@@ -227,7 +227,9 @@ def concat_segments(segment_paths: list[Path], output_path: Path, copy: bool = T
     """Concatenate video segments using ffmpeg concat demuxer."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         for seg in segment_paths:
-            f.write(f"file '{seg}'\n")
+            # Absolute: concat demuxer resolves relative paths against the
+            # list file's directory (a temp dir), not the cwd.
+            f.write(f"file '{Path(seg).resolve()}'\n")
         list_path = f.name
 
     codec_args = ["-c", "copy"] if copy else ["-c:v", "libx264", "-crf", "18"]
