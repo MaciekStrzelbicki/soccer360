@@ -314,3 +314,17 @@ class TestDashboardCalibration:
     def test_page_served(self, client):
         r = client.get("/calibrate/game")
         assert r.status_code == 200 and "Venue calibration" in r.text
+
+
+def test_cli_dotenv_does_not_override(tmp_path, monkeypatch):
+    from src.cli import _load_dotenv
+    env = tmp_path / ".env"
+    env.write_text('# c\nexport FOO_A="1"\nFOO_B=two\nFOO_C=from_file\n')
+    monkeypatch.delenv("FOO_A", raising=False)
+    monkeypatch.delenv("FOO_B", raising=False)
+    monkeypatch.setenv("FOO_C", "real")
+    _load_dotenv(env)
+    import os
+    assert os.environ["FOO_A"] == "1" and os.environ["FOO_B"] == "two"
+    assert os.environ["FOO_C"] == "real"
+    monkeypatch.delenv("FOO_A"); monkeypatch.delenv("FOO_B")

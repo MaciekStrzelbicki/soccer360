@@ -24,6 +24,24 @@ def _load_cli_utils():
     return load_config, setup_logging
 
 
+def _load_dotenv(path: Path) -> None:
+    """Load KEY=VALUE lines from a .env file (no override of real env vars)."""
+    import os
+
+    if not path.is_file():
+        return
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 @click.group()
 @click.option(
     "--config", "-c",
@@ -35,6 +53,9 @@ def _load_cli_utils():
 def cli(ctx: click.Context, config: str):
     """Soccer360 -- Automated 360 soccer video processing."""
     load_config, setup_logging = _load_cli_utils()
+    # Secrets such as OPENAI_API_KEY: ./.env (cwd), then the repo root .env
+    _load_dotenv(Path.cwd() / ".env")
+    _load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     ctx.ensure_object(dict)
     cfg = load_config(config)
 
