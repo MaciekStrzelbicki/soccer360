@@ -125,6 +125,11 @@ def test_config() -> dict:
                 "tactical_pitch": -5.0,
                 "scoreboard_overlay": {"enabled": False},
             },
+            "calibration": {
+                "enabled": False,
+                "dir": "calibrations",  # tests that enable it override with tmp_path
+                "llm": {"enabled": False},
+            },
             "highlights": {
                 "speed_percentile": 95,
                 "direction_change_deg": 90,

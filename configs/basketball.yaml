@@ -141,6 +141,12 @@ ingest:
 active_learning:
   export_dir: ./data/labeling
 
+calibration:
+  enabled: true
+  dir: ./data/state/calibrations
+  llm:
+    enabled: true                   # needs OPENAI_API_KEY; falls back to local auto without it
+
 dashboard:
   db_path: ./data/state/dashboard.db
 

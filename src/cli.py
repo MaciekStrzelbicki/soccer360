@@ -55,6 +55,10 @@ def cli(ctx: click.Context, config: str):
         if isinstance(value, str) and not Path(value).is_absolute():
             paths[key] = str(Path(value).resolve())
 
+    cal = cfg.get("calibration")
+    if isinstance(cal, dict) and isinstance(cal.get("dir"), str) and not Path(cal["dir"]).is_absolute():
+        cal["dir"] = str(Path(cal["dir"]).resolve())
+
     Path(paths["scratch"]).mkdir(parents=True, exist_ok=True)
     Path(paths["stagging"]).mkdir(parents=True, exist_ok=True)
     log_dir = Path(paths["logs"])
@@ -140,6 +144,57 @@ def export_hard_frames(
         threshold=threshold,
         output_dir=Path(out),
     )
+
+
+@cli.command()
+@click.argument("video_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--llm/--no-llm", default=None, help="Use the vision LLM (default: calibration.llm.enabled).")
+@click.option("--port", default=8088, help="Dashboard port for the printed calibration URL.")
+@click.pass_context
+def calibrate(ctx: click.Context, video_path: str, llm: bool | None, port: int):
+    """Find scoreboard and hoops in a 360 video (auto), save a preview.
+
+    The result is a starting point for the dashboard calibration page,
+    where it can be corrected and saved as the manual calibration.
+    """
+    import copy
+    import json
+
+    import cv2
+
+    from .calibration import (
+        calibration_config, grab_equirect, manual_path, preview_image,
+        register_video, resolve_calibration,
+    )
+    from .utils import probe_video
+
+    cfg = copy.deepcopy(ctx.obj["config"])
+    cal_cfg = cfg.setdefault("calibration", {})
+    cal_cfg["enabled"] = True
+    if llm is not None:
+        cal_cfg.setdefault("llm", {})["enabled"] = llm
+    meta = probe_video(video_path)
+    reg = register_video(cfg, video_path)
+
+    # ignore an existing manual file: we want a fresh automatic result
+    saved = json.loads(reg.read_text())
+    reg.write_text(json.dumps({**saved, "scoreboard": None, "hoops": []}, indent=2))
+    try:
+        cal = resolve_calibration(cfg, video_path, meta.duration)
+    finally:
+        reg.write_text(json.dumps(saved, indent=2))
+
+    auto_path = manual_path(cfg, video_path).with_suffix(".auto.json")
+    auto_path.write_text(json.dumps(cal, indent=2))
+    t = meta.duration * calibration_config(cfg)["sample_time_frac"]
+    prev = preview_image(grab_equirect(video_path, t, 3840), cal)
+    prev_path = auto_path.with_suffix(".png")
+    cv2.imwrite(str(prev_path), prev[..., ::-1])
+
+    click.echo(json.dumps(cal, indent=2))
+    click.echo(f"Auto result: {auto_path}")
+    click.echo(f"Preview:     {prev_path}")
+    click.echo(f"Adjust/save: http://localhost:{port}/calibrate/{Path(video_path).stem}")
 
 
 @cli.command()

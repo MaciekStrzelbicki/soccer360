@@ -1237,6 +1237,138 @@ def create_app(config: dict | None = None) -> FastAPI:
         return HTMLResponse(match_file.read_text())
 
     # ------------------------------------------------------------------
+    # Venue calibration (scoreboard / hoops)
+    # ------------------------------------------------------------------
+
+    from . import calibration as cal_mod
+
+    _cal_frame_cache: dict = {}
+    _VIDEO_EXT = {".mp4", ".mov", ".insv", ".mkv"}
+
+    def _cal_dir() -> Path:
+        return Path(cal_mod.calibration_config(config)["dir"])
+
+    def _cal_media_dirs() -> list[Path]:
+        pc = config.get("paths", {})
+        return [Path(pc[k]).resolve() for k in ("ingest", "stagging") if pc.get(k)]
+
+    def _cal_registered() -> dict[str, dict]:
+        out = {}
+        d = _cal_dir()
+        if d.is_dir():
+            for f in sorted(d.glob("*.json")):
+                if f.name.endswith(".auto.json"):
+                    continue
+                try:
+                    data = json.loads(f.read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if data.get("video_path"):
+                    out[f.stem] = data
+        for md in _cal_media_dirs():
+            if md.is_dir():
+                for v in sorted(md.iterdir()):
+                    if v.suffix.lower() in _VIDEO_EXT and v.stem not in out:
+                        out[v.stem] = {"video_path": str(v), "scoreboard": None,
+                                       "hoops": [], "unregistered": True}
+        return out
+
+    def _cal_video(stem: str) -> Path:
+        entry = _cal_registered().get(stem)
+        if not entry:
+            raise HTTPException(404, "Unknown video; run `soccer360 calibrate VIDEO` first")
+        vp = Path(entry["video_path"])
+        if not vp.is_file():
+            raise HTTPException(404, f"Video file missing: {vp}")
+        return vp
+
+    @app.get("/calibrate", response_class=HTMLResponse)
+    @app.get("/calibrate/{stem}", response_class=HTMLResponse)
+    async def calibrate_page(stem: str | None = None):
+        f = STATIC_DIR / "calibrate.html"
+        if not f.exists():
+            return HTMLResponse("<h1>Soccer360</h1><p>static/calibrate.html not found</p>")
+        return HTMLResponse(f.read_text())
+
+    @app.get("/api/calibration")
+    def calibration_list():
+        return {"videos": [
+            {"stem": k, "video_path": v["video_path"],
+             "has_manual": bool(v.get("scoreboard") or v.get("hoops")),
+             "has_auto": (_cal_dir() / f"{k}.auto.json").exists()}
+            for k, v in _cal_registered().items()
+        ]}
+
+    @app.get("/api/calibration/{stem}")
+    def calibration_get(stem: str):
+        vp = _cal_video(stem)
+        manual = cal_mod.load_manual(config, vp)
+        auto_f = _cal_dir() / f"{stem}.auto.json"
+        auto = json.loads(auto_f.read_text()) if auto_f.exists() else None
+        try:
+            from .utils import probe_video
+            duration = probe_video(vp).duration
+        except Exception:  # noqa: BLE001
+            duration = None
+        return {"stem": stem, "video_path": str(vp), "duration": duration,
+                "manual": manual, "auto": auto,
+                "config": cal_mod.from_static_config(config)}
+
+    @app.get("/api/calibration/{stem}/frame")
+    def calibration_frame(stem: str, t: float = 0.0, w: int = 3840):
+        vp = _cal_video(stem)
+        w = int(min(max(w, 960), 7680)) // 2 * 2
+        key = (str(vp), round(t, 1), w)
+        if key not in _cal_frame_cache:
+            try:
+                fr = cal_mod.grab_equirect(vp, t, w)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(500, f"Frame read failed: {exc}")
+            import cv2 as _cv2
+            ok, buf = _cv2.imencode(".jpg", fr[..., ::-1], [_cv2.IMWRITE_JPEG_QUALITY, 90])
+            if len(_cal_frame_cache) > 8:
+                _cal_frame_cache.clear()
+            _cal_frame_cache[key] = buf.tobytes()
+        from fastapi.responses import Response
+        return Response(_cal_frame_cache[key], media_type="image/jpeg")
+
+    @app.post("/api/calibration/{stem}")
+    def calibration_save(stem: str, payload: dict):
+        vp = _cal_video(stem)
+        sb = cal_mod.clean_scoreboard(payload.get("scoreboard"))
+        hoops = [h for h in map(cal_mod.clean_hoop, payload.get("hoops") or []) if h]
+        if not sb and not hoops:
+            raise HTTPException(400, "Nothing to save")
+        path = cal_mod.save_manual(config, vp, {"scoreboard": sb, "hoops": hoops})
+        return {"ok": True, "path": str(path), "scoreboard": sb, "hoops": hoops}
+
+    @app.delete("/api/calibration/{stem}/manual")
+    def calibration_clear(stem: str):
+        vp = _cal_video(stem)
+        cal_mod.register_video(config, vp)
+        p = cal_mod.manual_path(config, vp)
+        data = json.loads(p.read_text())
+        data.update({"scoreboard": None, "hoops": []})
+        p.write_text(json.dumps(data, indent=2))
+        return {"ok": True}
+
+    @app.post("/api/calibration/{stem}/auto")
+    def calibration_auto(stem: str, llm: bool = True):
+        import copy as _copy
+        vp = _cal_video(stem)
+        cfg = _copy.deepcopy(config)
+        cc = cfg.setdefault("calibration", {})
+        cc["enabled"] = True
+        cc.setdefault("llm", {})["enabled"] = bool(llm) and cc.get("llm", {}).get("enabled", True)
+        # fresh automatic result: bypass the manual file
+        cc["dir"] = str(_cal_dir() / ".auto-run")
+        from .utils import probe_video
+        res = cal_mod.resolve_calibration(cfg, vp, probe_video(vp).duration)
+        (_cal_dir()).mkdir(parents=True, exist_ok=True)
+        (_cal_dir() / f"{stem}.auto.json").write_text(json.dumps(res, indent=2))
+        return res
+
+    # ------------------------------------------------------------------
     # REST API
     # ------------------------------------------------------------------
 

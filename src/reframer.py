@@ -356,7 +356,7 @@ class Reframer:
                     logger.info("Broadcast segment %d/%d complete", i + 1, workers)
 
             logger.info("Concatenating %d broadcast segments", len(segments))
-            concat_segments(segments, output_path)
+            concat_segments(segments, output_path, audio_source=video_str)
         finally:
             for seg in segments:
                 seg.unlink(missing_ok=True)
@@ -437,7 +437,7 @@ class Reframer:
                     logger.info("Tactical segment %d/%d complete", i + 1, workers)
 
             logger.info("Concatenating %d tactical segments", len(segments))
-            concat_segments(segments, output_path)
+            concat_segments(segments, output_path, audio_source=video_str)
         finally:
             for seg in segments:
                 seg.unlink(missing_ok=True)

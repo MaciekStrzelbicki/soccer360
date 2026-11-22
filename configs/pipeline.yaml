@@ -289,6 +289,23 @@ center_of_play:
   velocity_fast_thresh_deg_per_sec: 20.0
   velocity_slow_thresh_deg_per_sec: 2.0
 
+# Venue calibration: where the scoreboard and hoops are in the 360 frame.
+# Priority: manual (dashboard /calibrate, `soccer360 calibrate VIDEO`)
+# > vision LLM (+ local refinement) > local auto > static config values.
+calibration:
+  enabled: false
+  dir: /tank/data/calibrations      # <video-stem>.json (manual), .auto.json
+  sample_time_frac: 0.5             # which frame the LLM looks at
+  refine_scoreboard: true           # snap scoreboard to the running game clock
+  hoops_from_players: true          # fallback hoop estimate from player detections
+  hoop_margin_deg: 3.0              # headroom above the backboard when zoomed
+  llm:
+    enabled: false
+    provider: openai
+    model: gpt-5                    # any OpenAI vision-capable chat model
+    api_key_env: OPENAI_API_KEY
+    timeout_sec: 120
+
 dashboard:
   enabled: true
   db_path: /tank/data/dashboard.db

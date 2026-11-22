@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .active_learning import ActiveLearningExporter
+from .calibration import apply_calibration, resolve_calibration
 from .camera import CameraPathGenerator
 from .detector import Detector, resolve_model_path, resolve_model_path_v1
 from .exporter import Exporter
@@ -76,6 +77,10 @@ class Pipeline:
 
         self.camera = CameraPathGenerator(config)
         self.reframer = Reframer(config)
+        # Per-job calibration (scoreboard / hoops) overrides these; keep the
+        # config values to restore between jobs.
+        self._base_keep_in_frame = list(getattr(self.camera, "keep_in_frame", []) or [])
+        self._base_scoreboard_overlay = getattr(self.reframer, "scoreboard_overlay", None)
         self.highlights = HighlightDetector(config)
         self.exporter = Exporter(config)
 
@@ -101,6 +106,31 @@ class Pipeline:
             if self.event_bus:
                 self.event_bus.phase_failed(job_id, phase_name)
             raise
+
+    def _calibrate(
+        self, timer, job_id, input_path, meta, work_dir,
+        detections_path=None, player_cluster_path=None,
+    ):
+        """Resolve scoreboard/hoop positions and push them into camera/reframer."""
+        import json as _json
+
+        if not self.config.get("calibration", {}).get("enabled", False):
+            return
+        self.camera.keep_in_frame = list(self._base_keep_in_frame)
+        self.reframer.scoreboard_overlay = self._base_scoreboard_overlay
+        logger.info("--- Phase 2.9: Venue Calibration ---")
+        try:
+            with self._tracked_phase(timer, job_id, "calibration"):
+                cal = resolve_calibration(
+                    self.config, input_path, meta.duration,
+                    detections_path=detections_path,
+                    player_cluster_path=player_cluster_path,
+                    det_size=(self.camera.det_width, self.camera.det_height),
+                )
+                apply_calibration(cal, self.camera, self.reframer, self.config)
+                (work_dir / "calibration.json").write_text(_json.dumps(cal, indent=2))
+        except Exception:
+            logger.exception("Calibration failed; using config values")
 
     def run(
         self,
@@ -276,6 +306,13 @@ class Pipeline:
                             detections_path, player_cluster_path, target_frames
                         )
 
+                # Phase 2.9: Venue calibration (scoreboard + hoops)
+                self._calibrate(
+                    timer, job_id, input_path, meta, work_dir,
+                    detections_path=detections_path,
+                    player_cluster_path=player_cluster_path,
+                )
+
                 # Phase 3: Camera path generation (CPU)
                 logger.info("--- Phase 3: Camera Path Generation ---")
                 with self._tracked_phase(timer, job_id, "camera"):
@@ -286,6 +323,7 @@ class Pipeline:
             else:
                 # NO_DETECT mode: skip detection/tracking, static camera
                 logger.info("--- NO_DETECT: Skipping phases 1-2, static camera path ---")
+                self._calibrate(timer, job_id, input_path, meta, work_dir)
                 with self._tracked_phase(timer, job_id, "camera"):
                     self.camera.generate_static(meta, camera_path_file)
                 tracks_path = None

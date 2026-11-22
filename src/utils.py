@@ -223,8 +223,18 @@ class FFmpegFrameWriter:
 # Video segment concatenation
 # ---------------------------------------------------------------------------
 
-def concat_segments(segment_paths: list[Path], output_path: Path, copy: bool = True):
-    """Concatenate video segments using ffmpeg concat demuxer."""
+def concat_segments(
+    segment_paths: list[Path],
+    output_path: Path,
+    copy: bool = True,
+    audio_source: str | Path | None = None,
+):
+    """Concatenate video segments using ffmpeg concat demuxer.
+
+    audio_source: muxes the first audio stream of this file (the original
+    360 recording) into the output; frames are 1:1 with the source, so the
+    audio stays in sync. Missing audio is fine (optional map).
+    """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         for seg in segment_paths:
             # Absolute: concat demuxer resolves relative paths against the
@@ -234,16 +244,29 @@ def concat_segments(segment_paths: list[Path], output_path: Path, copy: bool = T
 
     codec_args = ["-c", "copy"] if copy else ["-c:v", "libx264", "-crf", "18"]
 
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "concat", "-safe", "0",
-        "-i", list_path,
-        *codec_args,
-        str(output_path),
-    ]
+    def build(audio_codec: list[str]) -> list[str]:
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", list_path,
+        ]
+        if audio_source:
+            cmd += ["-i", str(audio_source), "-map", "0:v:0", "-map", "1:a:0?"]
+        cmd += codec_args
+        if audio_source:
+            cmd += [*audio_codec, "-shortest"]
+        cmd.append(str(output_path))
+        return cmd
 
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        try:
+            subprocess.run(build(["-c:a", "copy"]), check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            if not audio_source:
+                raise
+            # source audio codec not storable in MP4 as-is -> re-encode
+            subprocess.run(build(["-c:a", "aac", "-b:a", "192k"]),
+                           check=True, capture_output=True)
     finally:
         Path(list_path).unlink(missing_ok=True)
 
