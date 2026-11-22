@@ -382,3 +382,20 @@ def test_dashboard_view_preview_and_level_save(tmp_path, synthetic_video):
     assert r.status_code == 200
     m = c.get("/api/calibration/g").json()["manual"]
     assert m["level"] == {"roll_deg": 1.2, "tilt_deg": -0.3}
+
+
+def test_prior_only_selects_among_peaks_not_window():
+    """An LLM prior ~9 deg too high must still yield the real board."""
+    width = 3600  # 10 px/deg
+    score = np.zeros((650, 3600), np.float32)  # pitch +45..-20 band
+    box = (0, 450)                              # y0 at pitch +45
+    # real board: yaw 8, pitch 3 -> x 1880, y (90-3)*10-450 = 420
+    score[410:430, 1850:1910] = 0.25
+    # decoy compact blob: yaw 12, pitch 8 (weaker)
+    score[365:371, 1915:1925] = 0.12
+    sb = cal.score_to_scoreboard(score, box, width, prior={"yaw": 5, "pitch": 12})
+    assert sb["yaw"] == pytest.approx(8.0, abs=0.5)
+    assert sb["pitch"] == pytest.approx(3.0, abs=0.5)
+    # prior far from any peak -> ignored
+    sb2 = cal.score_to_scoreboard(score, box, width, prior={"yaw": -120, "pitch": 0})
+    assert sb2["yaw"] == pytest.approx(8.0, abs=0.5)

@@ -231,7 +231,8 @@ def scoreboard_clock_score(
     return score, (x0, y0, x1, y1)
 
 
-def pick_scoreboard_peak(score, width, candidates=30):
+def pick_scoreboard_peak(score, width, candidates=30, prior_xy=None,
+                         prior_radius_deg=(20.0, 15.0)):
     """Best clock-score peak, weighted by compactness.
 
     A scoreboard is a compact island of activity; moving jerseys or a
@@ -255,6 +256,12 @@ def pick_scoreboard_peak(score, width, candidates=30):
 
         compact = win(2, 4) / max(win(6, 15), 1)
         rank = val * compact ** 2
+        if prior_xy is not None:
+            dx = abs(xx - prior_xy[0]) / px
+            dx = min(dx, 360.0 - dx)
+            dy = abs(yy - prior_xy[1]) / px
+            if (dx / prior_radius_deg[0]) ** 2 + (dy / prior_radius_deg[1]) ** 2 > 1:
+                rank = 0.0  # far from where the LLM saw the scoreboard
         if rank > best_val:
             best, best_val = (yy, xx, val), rank
         s[max(0, int(yy - 3 * px)):int(yy + 3 * px),
@@ -262,12 +269,22 @@ def pick_scoreboard_peak(score, width, candidates=30):
     return best
 
 
-def score_to_scoreboard(score, box, width, min_score=0.08):
-    """Best clock-score peak -> scoreboard centre/size (degrees)."""
+def score_to_scoreboard(score, box, width, min_score=0.08, prior=None):
+    """Best clock-score peak -> scoreboard centre/size (degrees).
+
+    ``prior`` (yaw/pitch, e.g. from the LLM) restricts the choice to peaks
+    near it; if no peak is near, the prior is ignored.
+    """
     if score.size == 0 or float(score.max()) < min_score:
         return None
     h = width // 2
-    picked = pick_scoreboard_peak(score, width)
+    picked = None
+    if prior:
+        pxy = (yaw_to_x(float(prior["yaw"]), width) - box[0],
+               pitch_to_y(float(prior["pitch"]), h) - box[1])
+        picked = pick_scoreboard_peak(score, width, prior_xy=pxy)
+    if picked is None:
+        picked = pick_scoreboard_peak(score, width)
     if picked is None:
         return None
     yy, xx, peak = picked
@@ -315,19 +332,17 @@ def detect_scoreboard_auto(
     video_path, duration_sec, *, prior: dict | None = None, width: int = 3840,
     bursts: int = 12,
 ) -> dict | None:
-    """Find the scoreboard; with ``prior`` search only a window around it."""
-    if prior:
-        win_y = max(12.0, 1.5 * float(prior.get("width_deg", 8.0)))
-        win_p = max(8.0, 1.5 * float(prior.get("height_deg", 5.0)))
-        yr = (prior["yaw"] - win_y, prior["yaw"] + win_y)
-        pr = (prior["pitch"] - win_p, prior["pitch"] + win_p)
-    else:
-        yr, pr = (-180.0, 180.0), (-20.0, 45.0)
+    """Find the scoreboard (running game clock) anywhere above the court.
+
+    The whole band is always searched: an LLM ``prior`` can be off by ~10 deg,
+    so it only picks among candidate peaks (within ~20 x 15 deg) instead of
+    narrowing the search window (which can cut the real board out).
+    """
     score, box = scoreboard_clock_score(
-        video_path, duration_sec, yaw_range=yr, pitch_range=pr,
-        bursts=bursts, width=width,
+        video_path, duration_sec, yaw_range=(-180.0, 180.0),
+        pitch_range=(-20.0, 45.0), bursts=bursts, width=width,
     )
-    return score_to_scoreboard(score, box, width)
+    return score_to_scoreboard(score, box, width, prior=prior)
 
 
 # ---------------------------------------------------------------------------
