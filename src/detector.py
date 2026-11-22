@@ -23,6 +23,23 @@ from .utils import (
 )
 
 logger = logging.getLogger("soccer360.detector")
+
+
+def _precision_predict_kwargs(half: bool) -> dict:
+    """Return the predict() precision kwarg for the installed Ultralytics.
+
+    Ultralytics 8.4+ deprecates ``half`` in favour of ``quantize`` (16 = FP16,
+    None = FP32). Older releases reject ``quantize``, so fall back to ``half``.
+    """
+    try:
+        from ultralytics.cfg import DEFAULT_CFG_DICT
+
+        supports_quantize = "quantize" in DEFAULT_CFG_DICT
+    except Exception:  # pragma: no cover - ultralytics missing/broken
+        supports_quantize = False
+    if supports_quantize:
+        return {"quantize": 16 if half else None}
+    return {"half": bool(half)}
 DEFAULT_V1_MODEL_PATH = "/app/models/yolo26l.pt"
 DEFAULT_V1_MODEL_ALIASES = {DEFAULT_V1_MODEL_PATH, "yolo26l.pt"}
 DEFAULT_V1_RUNTIME_OVERRIDE_PATH = "/tank/data/ingest_model_selection.json"
@@ -1198,7 +1215,7 @@ class Detector:
         if self._v1_mode:
             predict_kwargs["classes"] = self.classes
             predict_kwargs["max_det"] = self.max_det
-            predict_kwargs["half"] = self.half
+            predict_kwargs.update(_precision_predict_kwargs(self.half))
         results = self._model.predict(frames, **predict_kwargs)
 
         detections = []
@@ -1222,7 +1239,7 @@ class Detector:
             "verbose": False,
             "classes": self.classes,
             "max_det": self.max_det,
-            "half": self.half,
+            **_precision_predict_kwargs(self.half),
         }
         results = self._shared_detection_model.predict(frames, **predict_kwargs)
         detections = []
@@ -1251,7 +1268,7 @@ class Detector:
             "iou": self.nms_iou,
             "verbose": False,
             "max_det": self.max_det,
-            "half": self.half,
+            **_precision_predict_kwargs(self.half),
         }
         if query_classes is not None:
             predict_kwargs["classes"] = query_classes
