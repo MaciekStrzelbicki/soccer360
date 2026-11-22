@@ -15,6 +15,7 @@ import math
 from pathlib import Path
 
 import numpy as np
+from scipy.ndimage import gaussian_filter1d, median_filter
 
 from .utils import VideoMeta, load_json, pixel_to_yaw_pitch, write_json
 
@@ -43,6 +44,72 @@ def unwrap_angles(angles: list[float]) -> list[float]:
 def wrap_angle(a: float) -> float:
     """Wrap angle to [-180, 180) range."""
     return ((a + 180.0) % 360.0) - 180.0
+
+
+def _gaussian_zero_phase(x: np.ndarray, sigma_frames: float) -> np.ndarray:
+    """Zero-phase Gaussian smoothing (no lag, edges held)."""
+    if sigma_frames <= 0 or len(x) < 2:
+        return x.astype(float, copy=True)
+    return gaussian_filter1d(x.astype(float), sigma=sigma_frames, mode="nearest")
+
+
+def _leash(x: np.ndarray, radius: float) -> np.ndarray:
+    """Continuous dead-zone ("leash"): output moves only once x leaves radius.
+
+    Unlike a per-frame deadband, the output is continuous -- it never holds
+    and then jumps, it just stops following small wiggles around the hold
+    point and slides along with x once x pushes against the edge.
+    """
+    if radius <= 0 or len(x) == 0:
+        return x.astype(float, copy=True)
+    out = np.empty(len(x), dtype=float)
+    h = float(x[0])
+    for i, v in enumerate(x):
+        if v - h > radius:
+            h = v - radius
+        elif h - v > radius:
+            h = v + radius
+        out[i] = h
+    return out
+
+
+def _limited_follow(
+    target: np.ndarray,
+    fps: float,
+    max_speed: float,
+    max_accel: float,
+    response_sec: float,
+) -> np.ndarray:
+    """Follow target with bounded velocity and acceleration (ease-in/out).
+
+    Proportional controller whose desired velocity is limited by the
+    stopping distance sqrt(2*a*|err|), so the camera decelerates smoothly
+    into the target instead of overshooting or stopping abruptly.
+    """
+    if len(target) == 0:
+        return target.astype(float, copy=True)
+    dt = 1.0 / fps
+    response = max(response_sec, dt)
+    pos = float(target[0])
+    vel = 0.0
+    out = np.empty(len(target), dtype=float)
+    for i, tgt in enumerate(target):
+        err = float(tgt) - pos
+        v_des = err / response
+        if max_accel > 0:
+            v_stop = math.copysign(math.sqrt(2.0 * max_accel * abs(err)), err)
+            if abs(v_des) > abs(v_stop):
+                v_des = v_stop
+        if max_speed > 0:
+            v_des = max(-max_speed, min(max_speed, v_des))
+        dv = v_des - vel
+        if max_accel > 0:
+            lim = max_accel * dt
+            dv = max(-lim, min(lim, dv))
+        vel += dv
+        pos += vel * dt
+        out[i] = pos
+    return out
 
 
 class CameraPathGenerator:
@@ -81,6 +148,24 @@ class CameraPathGenerator:
         self.lookahead_enabled = cam_cfg.get("lookahead_enabled", False)
         self.lookahead_frames = cam_cfg.get("lookahead_frames", 3)
         self.lookahead_max_deg = cam_cfg.get("lookahead_max_deg", 10.0)
+
+        # Smoothing mode: "cinematic" (offline zero-phase, continuous dead-zone,
+        # velocity/acceleration-limited follow, hysteresis zoom) or "legacy"
+        # (per-frame EMA + deadband + clamp).
+        self.smoothing_mode = cam_cfg.get("smoothing_mode", "cinematic")
+        self.pan_presmooth_sec = cam_cfg.get("pan_presmooth_sec", 0.3)
+        self.pan_deadzone_deg = cam_cfg.get("pan_deadzone_deg", 5.0)
+        self.pitch_deadzone_deg = cam_cfg.get("pitch_deadzone_deg", 3.0)
+        self.pan_response_sec = cam_cfg.get("pan_response_sec", 0.6)
+        self.max_pan_accel = cam_cfg.get("max_pan_accel_deg_per_sec2", 45.0)
+        self.pan_final_smooth_sec = cam_cfg.get("pan_final_smooth_sec", 0.25)
+        self.fov_from_speed = cam_cfg.get("fov_from_speed", False)
+        self.fov_presmooth_sec = cam_cfg.get("fov_presmooth_sec", 2.0)
+        self.fov_hysteresis_deg = cam_cfg.get("fov_hysteresis_deg", 8.0)
+        self.fov_min_hold_sec = cam_cfg.get("fov_min_hold_sec", 4.0)
+        self.fov_max_rate = cam_cfg.get("fov_max_rate_deg_per_sec", 4.0)
+        self.fov_max_accel = cam_cfg.get("fov_max_accel_deg_per_sec2", 4.0)
+        self.fov_final_smooth_sec = cam_cfg.get("fov_final_smooth_sec", 0.5)
 
         kalman_cfg = cam_cfg.get("kalman", {})
         self.process_noise = kalman_cfg.get("process_noise", 0.1)
@@ -175,14 +260,20 @@ class CameraPathGenerator:
         # Step 2: Kalman filter smoothing
         kalman_output = self._kalman_smooth(raw_angles, fps)
 
-        # Step 3: EMA post-smoothing
-        ema_output = self._ema_smooth(kalman_output)
+        cinematic = self.smoothing_mode == "cinematic"
+        if cinematic:
+            # Steps 3-4 (cinematic): zero-phase smoothing + continuous
+            # dead-zone + velocity/acceleration-limited follow.
+            clamped = self._cinematic_pan(kalman_output, fps)
+        else:
+            # Step 3: EMA post-smoothing
+            ema_output = self._ema_smooth(kalman_output)
 
-        # Step 3.5: Spatial dead-zone (suppress pan when ball near frame center)
-        ema_output = self._apply_spatial_deadzone(ema_output)
+            # Step 3.5: Spatial dead-zone (suppress pan when ball near frame center)
+            ema_output = self._apply_spatial_deadzone(ema_output)
 
-        # Step 4: Pan speed clamping
-        clamped = self._clamp_pan_speed(ema_output, fps)
+            # Step 4: Pan speed clamping
+            clamped = self._clamp_pan_speed(ema_output, fps)
 
         # Step 5: FOV computation (with optional spread data from clusters)
         if clusters is not None and self.cop_fov_from_spread:
@@ -197,7 +288,10 @@ class CameraPathGenerator:
                     entry["spread_x_deg"] = last_spread
                 elif last_spread is not None:
                     entry["spread_x_deg"] = last_spread
-        camera_path = self._compute_fov(clamped, fps)
+        if cinematic:
+            camera_path = self._compute_fov_cinematic(clamped, fps)
+        else:
+            camera_path = self._compute_fov(clamped, fps)
 
         logger.info("Camera path generated: %d entries", len(camera_path))
         write_json(camera_path, output_path)
@@ -585,6 +679,116 @@ class CameraPathGenerator:
             clamped.append(curr)
 
         return clamped
+
+    def _cinematic_pan(self, entries: list[dict], fps: float) -> list[dict]:
+        """Offline cinematic pan: smooth, continuous, ease-in/ease-out.
+
+        1. Zero-phase Gaussian pre-smoothing (removes detector jitter, no lag)
+        2. Continuous dead-zone / leash (ignore small wiggles without the
+           hold-then-jump staircase a per-frame deadband produces)
+        3. Velocity + acceleration limited follow (camera eases into moves)
+        4. Light zero-phase Gaussian to round off remaining corners
+        """
+        if not entries:
+            return []
+        yaw = np.array(unwrap_angles([e["yaw"] for e in entries]), dtype=float)
+        pitch = np.array([e["pitch"] for e in entries], dtype=float)
+
+        def process(x: np.ndarray, deadzone: float) -> np.ndarray:
+            x = _gaussian_zero_phase(x, self.pan_presmooth_sec * fps)
+            x = _leash(x, deadzone)
+            x = _limited_follow(
+                x, fps,
+                max_speed=self.max_fast_pan_speed,
+                max_accel=self.max_pan_accel,
+                response_sec=self.pan_response_sec,
+            )
+            return _gaussian_zero_phase(x, self.pan_final_smooth_sec * fps)
+
+        yaw_s = process(yaw, self.pan_deadzone_deg)
+        pitch_s = process(pitch, self.pitch_deadzone_deg)
+
+        out = []
+        for e, y, p in zip(entries, yaw_s, pitch_s):
+            out.append({**e, "yaw": float(y), "pitch": float(p)})
+        return out
+
+    def _fov_target(self, entry: dict) -> float:
+        """Per-frame zoom target (before temporal smoothing)."""
+        target = self.default_fov
+        if self.fov_from_speed:
+            # d_yaw/d_pitch are deg/sec; saturate at max_pan_speed
+            speed = math.sqrt(
+                entry.get("d_yaw", 0) ** 2 + entry.get("d_pitch", 0) ** 2
+            )
+            t = min(speed / max(self.max_pan_speed, 1e-6), 1.0)
+            target = self.min_fov + (self.max_fov - self.min_fov) * t
+
+        spread = entry.get("spread_x_deg")
+        if spread is not None and self.cop_fov_from_spread:
+            t = (spread - self.cop_spread_min_deg) / max(
+                self.cop_spread_max_deg - self.cop_spread_min_deg, 1e-6
+            )
+            t = max(0.0, min(1.0, t))
+            spread_fov = self.min_fov + (self.cop_spread_max_fov - self.min_fov) * t
+            target = spread_fov if not self.fov_from_speed else max(target, spread_fov)
+
+        # Only widen for sustained loss, not for every single missed frame
+        if (
+            entry.get("lost", False)
+            and self.lost_fov_widen
+            and entry.get("lost_count", 0) > self.lost_coast_frames
+        ):
+            target = max(target, self.max_fov)
+        return target
+
+    def _compute_fov_cinematic(self, entries: list[dict], fps: float) -> list[dict]:
+        """Rare, slow zoom changes.
+
+        Robust (median + Gaussian) smoothing of the zoom target, then a
+        hysteresis hold: the zoom level changes only when the smoothed target
+        differs by more than fov_hysteresis_deg and at least fov_min_hold_sec
+        has passed since the last change. Transitions are rate/accel-limited.
+        """
+        if not entries:
+            return []
+        target = np.array([self._fov_target(e) for e in entries], dtype=float)
+        med = max(1, int(round(fps)) | 1)  # ~1 s, odd window
+        if len(target) >= med:
+            target = median_filter(target, size=med, mode="nearest")
+        target = _gaussian_zero_phase(target, self.fov_presmooth_sec * fps)
+
+        level = np.empty_like(target)
+        held = float(target[0])
+        min_hold = self.fov_min_hold_sec * fps
+        window = max(1, int(round(min_hold)))
+        last_change = -math.inf
+        for i, t in enumerate(target):
+            if abs(t - held) > self.fov_hysteresis_deg and i - last_change >= min_hold:
+                # Offline: commit to where the target settles over the next
+                # hold window, not the mid-ramp value at the trigger frame.
+                held = float(np.median(target[i : i + window]))
+                last_change = i
+            level[i] = held
+
+        fov = _limited_follow(
+            level, fps,
+            max_speed=self.fov_max_rate,
+            max_accel=self.fov_max_accel,
+            response_sec=1.0,
+        )
+        fov = _gaussian_zero_phase(fov, self.fov_final_smooth_sec * fps)
+        hi = max(self.max_fov, self.cop_spread_max_fov)
+        fov = np.clip(fov, self.min_fov, hi)
+
+        return [
+            {
+                "yaw": wrap_angle(e["yaw"]),
+                "pitch": float(np.clip(e["pitch"], -89.0, 89.0)),
+                "fov": round(float(f), 2),
+            }
+            for e, f in zip(entries, fov)
+        ]
 
     def _compute_fov(self, entries: list[dict], fps: float) -> list[dict]:
         """Compute per-frame FOV based on ball velocity and lost state.
