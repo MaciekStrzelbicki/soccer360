@@ -25,6 +25,7 @@ from .projection import (
     view_maps,
     zenith_from_roll_tilt,
 )
+from .calibration import shift_at
 from .utils import (
     FFmpegFrameReader,
     FFmpegFrameWriter,
@@ -176,8 +177,13 @@ def _render_segment(
             # Skip overlap warmup frames
             if i >= skip_count:
                 if overlay:
+                    ov = overlay
+                    if overlay.get("shifts"):  # camera bumped: follow the board
+                        dy, dp = shift_at(overlay["shifts"], (actual_start + i) / fps)
+                        ov = {**overlay, "yaw": overlay["yaw"] + dy,
+                              "pitch": overlay["pitch"] + dp}
                     perspective = _paste_overlay(
-                        perspective, _scoreboard_patch(frame, overlay), overlay
+                        perspective, _scoreboard_patch(frame, ov), ov
                     )
                 writer.write(perspective)
                 written += 1

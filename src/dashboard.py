@@ -1377,8 +1377,14 @@ def create_app(config: dict | None = None) -> FastAPI:
                 raise HTTPException(400, "Invalid level")
         if not sb and not hoops and not level:
             raise HTTPException(400, "Nothing to save")
+        fts = payload.get("frame_time_sec")
+        try:
+            fts = None if fts is None else float(fts)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Invalid frame_time_sec")
         path = cal_mod.save_manual(
-            config, vp, {"scoreboard": sb, "hoops": hoops, "level": level})
+            config, vp, {"scoreboard": sb, "hoops": hoops, "level": level,
+                         "frame_time_sec": fts})
         return {"ok": True, "path": str(path), "scoreboard": sb, "hoops": hoops,
                 "level": level}
 

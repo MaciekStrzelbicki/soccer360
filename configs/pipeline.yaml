@@ -314,6 +314,8 @@ calibration:
   refine_scoreboard: true           # snap scoreboard to the running game clock
   hoops_from_players: true          # fallback hoop estimate from player detections
   hoop_margin_deg: 3.0              # headroom above the backboard when zoomed
+  track_camera_shifts: true         # re-check the scoreboard over time; follow camera bumps
+  shift_check_interval_sec: 10.0
   llm:
     enabled: false
     provider: openai

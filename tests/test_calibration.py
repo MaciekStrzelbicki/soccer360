@@ -399,3 +399,68 @@ def test_prior_only_selects_among_peaks_not_window():
     # prior far from any peak -> ignored
     sb2 = cal.score_to_scoreboard(score, box, width, prior={"yaw": -120, "pitch": 0})
     assert sb2["yaw"] == pytest.approx(8.0, abs=0.5)
+
+
+class TestCameraShifts:
+    @staticmethod
+    def _hall(w=1440, h=720, seed=3):
+        rng = np.random.default_rng(seed)
+        img = (rng.random((h // 8, w // 8, 3)) * 255).astype(np.uint8)
+        img = cv2_resize(img, (w, h))
+        # scoreboard-ish dark panel at yaw 10, pitch 5
+        x, y = int((10 + 180) / 360 * w), int((90 - 5) / 180 * h)
+        img[y - 8:y + 8, x - 15:x + 15] = 20
+        return img
+
+    def test_detects_bump_and_refines_time(self):
+        base = self._hall()
+        px_per_deg = base.shape[1] / 360.0
+        bump_t, dx, dy = 95.3, 12, -6   # +3 deg yaw, +1.5 deg pitch
+
+        def grab(t):
+            if t >= bump_t:
+                return np.roll(np.roll(base, dx, axis=1), dy, axis=0)
+            return base
+
+        sb = {"yaw": 10.0, "pitch": 5.0, "width_deg": 8.0, "height_deg": 4.0}
+        shifts = cal.track_camera_shifts(grab, 200.0, sb, ref_time_sec=20.0,
+                                         interval_sec=10.0, refine_to_sec=0.5)
+        assert len(shifts) == 2 and shifts[0]["dyaw"] == 0
+        assert shifts[1]["from_sec"] == pytest.approx(bump_t, abs=0.5)
+        assert shifts[1]["dyaw"] == pytest.approx(dx / px_per_deg, abs=0.3)
+        assert shifts[1]["dpitch"] == pytest.approx(-dy / px_per_deg, abs=0.3)
+        assert cal.shift_at(shifts, 50) == (0.0, 0.0)
+        assert cal.shift_at(shifts, 150) == (shifts[1]["dyaw"], shifts[1]["dpitch"])
+
+    def test_static_camera_returns_empty(self):
+        base = self._hall()
+        sb = {"yaw": 10.0, "pitch": 5.0, "width_deg": 8.0, "height_deg": 4.0}
+        assert cal.track_camera_shifts(lambda t: base, 120.0, sb, ref_time_sec=60.0) == []
+
+    def test_apply_passes_shifts(self, tmp_path):
+        class Cam:
+            keep_in_frame = []
+
+        class Ref:
+            scoreboard_overlay = {"enabled": True}
+
+        cam, ref = Cam(), Ref()
+        shifts = [{"from_sec": 0.0, "dyaw": 0.0, "dpitch": 0.0},
+                  {"from_sec": 10.0, "dyaw": 3.0, "dpitch": 0.0}]
+        cal.apply_calibration({"scoreboard": {"yaw": 8, "pitch": 3, "width_deg": 6, "height_deg": 3},
+                               "hoops": [], "camera_shifts": shifts}, cam, ref, _cfg(tmp_path))
+        assert cam.scene_shifts == shifts
+        assert ref.scoreboard_overlay["shifts"] == shifts
+
+
+def cv2_resize(img, size):
+    import cv2
+    return cv2.resize(img, size, interpolation=cv2.INTER_CUBIC)
+
+
+def test_save_manual_keeps_frame_time(tmp_path):
+    c = _cfg(tmp_path)
+    v = tmp_path / "m.mp4"
+    cal.save_manual(c, v, {"scoreboard": {"yaw": 1, "pitch": 1, "width_deg": 5, "height_deg": 2},
+                           "frame_time_sec": 123.0})
+    assert cal.load_manual(c, v)["frame_time_sec"] == 123.0

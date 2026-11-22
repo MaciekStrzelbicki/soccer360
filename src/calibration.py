@@ -59,6 +59,8 @@ def calibration_config(config: dict) -> dict:
     cal.setdefault("hoops_from_players", True)
     cal.setdefault("hoop_margin_deg", 3.0)
     cal.setdefault("estimate_level", True)   # camera roll/tilt from vertical lines
+    cal.setdefault("track_camera_shifts", True)  # detect camera bumps over time
+    cal.setdefault("shift_check_interval_sec", 10.0)
     llm = dict(cal.get("llm", {}) or {})
     llm.setdefault("enabled", False)
     llm.setdefault("provider", "openai")
@@ -97,6 +99,8 @@ def save_manual(config: dict, video_path: str | Path, data: dict) -> Path:
         "scoreboard": data.get("scoreboard"),
         "hoops": data.get("hoops") or [],
     }
+    if data.get("frame_time_sec") is not None:
+        out["frame_time_sec"] = float(data["frame_time_sec"])
     if data.get("level"):
         out["level"] = {
             "roll_deg": float(data["level"].get("roll_deg", 0.0)),
@@ -343,6 +347,125 @@ def detect_scoreboard_auto(
         pitch_range=(-20.0, 45.0), bursts=bursts, width=width,
     )
     return score_to_scoreboard(score, box, width, prior=prior)
+
+
+# ---------------------------------------------------------------------------
+# Camera bumps: track the scoreboard surroundings over time
+# ---------------------------------------------------------------------------
+
+def _context_box(sb: dict) -> tuple[float, float, float, float]:
+    """Yaw/pitch half-extents of the scoreboard + surroundings template."""
+    return (max(1.5 * float(sb["width_deg"]), 6.0), max(1.5 * float(sb["height_deg"]), 4.0))
+
+
+def _gray(img: np.ndarray) -> np.ndarray:
+    g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    return cv2.GaussianBlur(g, (0, 0), 1.0)
+
+
+def make_shift_template(frame: np.ndarray, sb: dict) -> np.ndarray | None:
+    """Scoreboard + surroundings (frame, wall, windows) as a grey template.
+
+    The digits change but the surroundings dominate the template, so the
+    match stays strong while the clock runs.
+    """
+    hy, hp = _context_box(sb)
+    if abs(sb["yaw"]) + hy > 179:
+        return None  # across the seam: not supported
+    crop, _ = crop_equirect(frame, (sb["yaw"] - hy, sb["yaw"] + hy),
+                            (sb["pitch"] - hp, sb["pitch"] + hp))
+    return _gray(crop) if crop.size else None
+
+
+def match_shift(frame: np.ndarray, sb: dict, template: np.ndarray,
+                max_shift_deg: float = 8.0) -> tuple[float, float, float]:
+    """(dyaw, dpitch, score) of the template in ``frame`` vs. its calibrated spot."""
+    h, w = frame.shape[:2]
+    hy, hp = _context_box(sb)
+    yr = (sb["yaw"] - hy - max_shift_deg, sb["yaw"] + hy + max_shift_deg)
+    pr = (sb["pitch"] - hp - max_shift_deg, sb["pitch"] + hp + max_shift_deg)
+    region, yr = crop_equirect(frame, yr, pr)
+    if region.size == 0 or region.shape[0] < template.shape[0] or region.shape[1] < template.shape[1]:
+        return 0.0, 0.0, 0.0
+    res = cv2.matchTemplate(_gray(region), template, cv2.TM_CCOEFF_NORMED)
+    _, score, _, loc = cv2.minMaxLoc(res)
+    deg = 360.0 / w
+    # template top-left at no shift = max_shift_deg from region top-left
+    x0 = int(yaw_to_x(yr[0], w)) if yr[0] > -180 else 0
+    exp_x = int(yaw_to_x(sb["yaw"] - hy, w)) - x0
+    y0 = int(max(0, pitch_to_y(pr[1], h)))
+    exp_y = int(pitch_to_y(sb["pitch"] + hp, h)) - y0
+    return (loc[0] - exp_x) * deg, -(loc[1] - exp_y) * deg, float(score)
+
+
+def track_camera_shifts(
+    grab, duration_sec: float, sb: dict, *, ref_time_sec: float,
+    interval_sec: float = 10.0, min_shift_deg: float = 0.4, min_score: float = 0.5,
+    refine_to_sec: float = 0.5,
+) -> list[dict]:
+    """Detect camera bumps from the scoreboard surroundings.
+
+    ``grab(t) -> equirect RGB frame``. Returns time segments
+    ``[{"from_sec", "dyaw", "dpitch"}]`` relative to the calibrated position,
+    or [] when the camera never moved. Every sample is matched against the
+    reference template (no drift); a change needs two agreeing samples; the
+    bump time is refined by bisection.
+    """
+    ref = grab(ref_time_sec)
+    template = make_shift_template(ref, sb)
+    if template is None:
+        return []
+
+    def offset(t):
+        dy, dp, sc = match_shift(grab(t), sb, template)
+        return (dy, dp) if sc >= min_score else None
+
+    times = list(np.arange(0.0, max(duration_sec - 0.5, 0.0), interval_sec))
+    samples = [(t, offset(t)) for t in times]
+    samples = [(t, o) for t, o in samples if o is not None]
+    if not samples:
+        return []
+
+    def far(a, b):
+        return math.hypot(a[0] - b[0], a[1] - b[1]) > min_shift_deg
+
+    segments = [{"from_sec": 0.0, "off": samples[0][1]}]
+    i = 1
+    while i < len(samples):
+        t, o = samples[i]
+        cur = segments[-1]["off"]
+        confirmed = i + 1 >= len(samples) or not far(samples[i + 1][1], o)
+        if far(o, cur) and confirmed:
+            lo, hi = samples[i - 1][0], t
+            while hi - lo > refine_to_sec:  # bisect the bump time
+                mid = (lo + hi) / 2
+                om = offset(mid)
+                if om is None:
+                    break
+                if far(om, cur):
+                    hi = mid
+                else:
+                    lo = mid
+            segments.append({"from_sec": hi, "off": o})
+        i += 1
+
+    out = [{"from_sec": round(float(sg["from_sec"]), 2),
+            "dyaw": round(float(sg["off"][0]), 2),
+            "dpitch": round(float(sg["off"][1]), 2)} for sg in segments]
+    if len(out) == 1 and math.hypot(out[0]["dyaw"], out[0]["dpitch"]) <= min_shift_deg:
+        return []
+    return out
+
+
+def shift_at(shifts: list[dict] | None, t_sec: float) -> tuple[float, float]:
+    """Camera shift (dyaw, dpitch) in effect at ``t_sec``."""
+    dy = dp = 0.0
+    for sg in shifts or []:
+        if t_sec >= sg["from_sec"]:
+            dy, dp = sg["dyaw"], sg["dpitch"]
+        else:
+            break
+    return dy, dp
 
 
 # ---------------------------------------------------------------------------
@@ -705,6 +828,7 @@ def resolve_calibration(
         logger.info("Calibration: manual (%s)", manual_path(config, video_path))
         if not manual.get("level") and cal_cfg["estimate_level"]:
             manual["level"] = _estimate_level(video_path, duration_sec, cal_cfg)
+        _add_camera_shifts(manual, video_path, duration_sec, cal_cfg)
         return manual
 
     result = {"source": "auto", "scoreboard": None, "hoops": []}
@@ -756,10 +880,45 @@ def resolve_calibration(
         result["scoreboard"] = static["scoreboard"]
     if not result["hoops"]:
         result["hoops"] = static["hoops"]
-    logger.info("Calibration (%s): scoreboard=%s hoops=%s level=%s",
+    result.setdefault("frame_time_sec", round(duration_sec * cal_cfg["sample_time_frac"], 2))
+    _add_camera_shifts(result, video_path, duration_sec, cal_cfg)
+    logger.info("Calibration (%s): scoreboard=%s hoops=%s level=%s shifts=%s",
                 result["source"], result["scoreboard"], result["hoops"],
-                result.get("level"))
+                result.get("level"), result.get("camera_shifts"))
     return result
+
+
+def _add_camera_shifts(cal: dict, video_path, duration_sec, cal_cfg) -> None:
+    """Attach camera bump segments (scoreboard must be known)."""
+    sb = cal.get("scoreboard")
+    if not cal_cfg["track_camera_shifts"] or not sb:
+        return
+    cache: dict = {}
+
+    def grab(t):
+        key = round(float(t), 2)
+        if key not in cache:
+            if len(cache) > 4:
+                cache.pop(next(iter(cache)))
+            cache[key] = grab_equirect(video_path, t, 3840)
+        return cache[key]
+
+    ref_t = cal.get("frame_time_sec")
+    if ref_t is None:
+        ref_t = duration_sec * cal_cfg["sample_time_frac"]
+    try:
+        shifts = track_camera_shifts(
+            grab, duration_sec, sb, ref_time_sec=float(ref_t),
+            interval_sec=float(cal_cfg["shift_check_interval_sec"]),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Camera shift tracking failed: %s", exc)
+        return
+    cal["camera_shifts"] = shifts
+    for sg in shifts:
+        if sg["from_sec"] > 0:
+            logger.warning("Camera moved at %.1fs: yaw %+.2f, pitch %+.2f deg",
+                           sg["from_sec"], sg["dyaw"], sg["dpitch"])
 
 
 def _estimate_level(video_path, duration_sec, cal_cfg) -> dict | None:
@@ -793,9 +952,11 @@ def apply_calibration(cal: dict, camera, reframer, config: dict) -> None:
         reframer.level_zenith = zenith_from_roll_tilt(
             float(lvl.get("roll_deg", 0.0)), float(lvl.get("tilt_deg", 0.0))
         )
+    camera.scene_shifts = cal.get("camera_shifts") or []
     sb = cal.get("scoreboard")
     if sb and reframer.scoreboard_overlay is not None:
         ov = dict(reframer.scoreboard_overlay)
+        ov["shifts"] = cal.get("camera_shifts") or []
         ov["yaw"] = sb["yaw"]
         ov["pitch"] = sb["pitch"]
         ov["fov_h"] = round(sb["width_deg"] * 1.1, 2)

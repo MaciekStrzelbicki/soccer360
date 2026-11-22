@@ -1086,3 +1086,28 @@ class TestCinematicCamera:
         assert floor[3] == pytest.approx(100) and floor[4] == pytest.approx(100)
         test_config["camera"]["fov_hoop_zoom"]["enabled"] = False
         assert np.all(np.isneginf(CameraPathGenerator(test_config)._fov_floor_by_hoop_distance(ents)))
+
+    def test_keep_in_frame_follows_camera_shift(self, test_config, tmp_work_dir):
+        """After a camera bump the hoop constraint applies at the shifted yaw."""
+        tracks = [{"frame": i, "ball": self._ball_at_yaw(test_config, 50.0)} for i in range(300)]
+        hoop = {"yaw": 50.0, "pitch": 45.0, "margin_deg": 3.0}
+        test_config["camera"]["keep_in_frame"] = [hoop]
+        test_config["camera"]["smoothing_mode"] = "cinematic"
+        n = len(tracks)
+        meta = VideoMeta(width=640, height=320, fps=self.FPS, duration=n / self.FPS,
+                         total_frames=n, codec="h264")
+        tp = tmp_work_dir / "t_shift.json"
+        tp.write_text(json.dumps(tracks))
+        gen = CameraPathGenerator(test_config)
+        out = tmp_work_dir / "c_noshift.json"
+        gen.generate(tp, meta, out)
+        base = json.loads(out.read_text())
+        gen = CameraPathGenerator(test_config)
+        gen.scene_shifts = [{"from_sec": 0.0, "dyaw": 0.0, "dpitch": 0.0},
+                            {"from_sec": 5.0, "dyaw": 120.0, "dpitch": 0.0}]
+        out2 = tmp_work_dir / "c_shift.json"
+        gen.generate(tp, meta, out2)
+        shifted = json.loads(out2.read_text())
+        # before the bump identical; well after it the hoop is far away -> no raise
+        assert shifted[60]["pitch"] == pytest.approx(base[60]["pitch"], abs=1e-6)
+        assert shifted[-30]["pitch"] < base[-30]["pitch"] - 5

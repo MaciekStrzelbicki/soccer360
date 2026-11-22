@@ -209,6 +209,8 @@ class CameraPathGenerator:
         # Points (e.g. hoops) kept inside the top of the frame when the
         # camera looks their way: [{yaw, pitch, margin_deg}].
         self.keep_in_frame = cam_cfg.get("keep_in_frame", []) or []
+        # camera bumps detected by calibration: [{from_sec, dyaw, dpitch}]
+        self.scene_shifts: list[dict] = []
         out_res = config.get("reframer", {}).get("output_resolution", [1920, 1080])
         self.output_aspect = out_res[1] / out_res[0] if out_res[0] else 9 / 16
         # keystone correction changes where the top edge of the frame is
@@ -820,7 +822,7 @@ class CameraPathGenerator:
             target = max(target, self.max_fov)
         return target
 
-    def _fov_floor_by_hoop_distance(self, entries: list[dict]) -> np.ndarray:
+    def _fov_floor_by_hoop_distance(self, entries: list[dict], fps: float = 30.0) -> np.ndarray:
         """Minimum FOV from where the camera looks: zoom only near the hoops.
 
         Within ``near_deg`` (yaw) of a hoop the floor is min_fov; beyond
@@ -832,7 +834,11 @@ class CameraPathGenerator:
             return np.full(n, -np.inf)
         yaw = np.array([e["yaw"] for e in entries], dtype=float)
         hy = np.array([float(pt["yaw"]) for pt in self.keep_in_frame])
-        d = np.min(np.abs((yaw[:, None] - hy[None, :] + 180.0) % 360.0 - 180.0), axis=1)
+        shift = np.zeros(n)
+        for sg in self.scene_shifts or []:
+            shift[int(round(float(sg["from_sec"]) * fps)):] = float(sg["dyaw"])
+        d = np.min(np.abs((yaw[:, None] - (hy[None, :] + shift[:, None]) + 180.0)
+                          % 360.0 - 180.0), axis=1)
         near, far = self.fov_hoop_near_deg, max(self.fov_hoop_far_deg, self.fov_hoop_near_deg + 1e-6)
         w = np.clip((d - near) / (far - near), 0.0, 1.0)
         return self.min_fov + (self.fov_mid_min - self.min_fov) * w
@@ -851,7 +857,7 @@ class CameraPathGenerator:
         lead = int(round(self.pan_lead_sec * fps))
         if 0 < lead < len(target):
             target = np.concatenate([target[lead:], np.full(lead, target[-1])])
-        target = np.maximum(target, self._fov_floor_by_hoop_distance(entries))
+        target = np.maximum(target, self._fov_floor_by_hoop_distance(entries, fps))
         med = max(1, int(round(fps)) | 1)  # ~1 s, odd window
         if len(target) >= med:
             target = median_filter(target, size=med, mode="nearest")
@@ -906,11 +912,18 @@ class CameraPathGenerator:
             np.arctan(np.tan(np.radians(half_h)) * self.output_aspect)
         )
         raise_by = np.zeros(len(path))
+        n = len(path)
+        sy = np.zeros(n)
+        sp = np.zeros(n)
+        for sg in getattr(self, "scene_shifts", None) or []:  # camera bumps
+            i0 = int(round(float(sg["from_sec"]) * fps))
+            sy[i0:] = float(sg["dyaw"])
+            sp[i0:] = float(sg["dpitch"])
         for pt in self.keep_in_frame:
-            p_yaw = float(pt["yaw"])
-            p_pitch = float(pt["pitch"])
+            p_yaw = float(pt["yaw"]) + sy
+            p_pitch = float(pt["pitch"]) + sp
             margin = float(pt.get("margin_deg", 3.0))
-            d = np.abs([angle_diff(p_yaw, y) for y in yaw])
+            d = np.abs([angle_diff(a, y) for a, y in zip(p_yaw, yaw)])
             # weight 1 while inside the frame, ramps to 0 over 15 deg outside
             w = np.clip((half_h + 15.0 - d) / 15.0, 0.0, 1.0)
             k = self.vertical_correction

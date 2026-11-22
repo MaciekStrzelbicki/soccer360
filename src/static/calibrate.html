@@ -57,7 +57,7 @@
   <aside class="card">
     <a href="/" class="muted">← Control Room</a>
     <h1>Venue calibration</h1>
-    <p class="muted">Scoreboard (overlay) and hoops (kept in frame when zoomed). Saved per video; overrides automatic detection.</p>
+    <p class="muted">Scoreboard (overlay) and hoops (kept in frame when zoomed). Saved per video; overrides automatic detection. Mark them on the current frame: if the camera is bumped later, processing follows the scoreboard from this frame.</p>
 
     <h2>Videos</h2>
     <div class="videos" id="videos"><span class="muted">Loading…</span></div>
@@ -78,6 +78,7 @@
       <label class="muted">tilt° <input id="tilt" type="number" step="0.1" value="0" style="width:70px"></label>
     </div>
     <p class="muted" id="levelInfo" style="margin-top:4px">–</p>
+    <p class="muted" id="shiftInfo" style="margin-top:4px"></p>
 
     <h2>Scoreboard cut</h2>
     <canvas id="sbPreview" height="120"></canvas>
@@ -182,6 +183,10 @@ function useCal(c, label) {
   const lv = c.level || null;
   $("roll").value = lv ? lv.roll_deg : 0; $("tilt").value = lv ? lv.tilt_deg : 0;
   $("levelInfo").textContent = lv ? `camera roll ${lv.roll_deg}°, tilt ${lv.tilt_deg}°` + (lv.inliers ? ` (from ${lv.inliers} vertical lines)` : "") : "no level measured";
+  const sh = (c.camera_shifts || []).filter((x) => x.from_sec > 0);
+  $("shiftInfo").innerHTML = sh.length
+    ? "⚠ Camera moved: " + sh.map((x) => `${Math.floor(x.from_sec / 60)}:${String(Math.floor(x.from_sec % 60)).padStart(2, "0")} (yaw ${x.dyaw > 0 ? "+" : ""}${x.dyaw}°, pitch ${x.dpitch > 0 ? "+" : ""}${x.dpitch}°)`).join(", ") + " — followed automatically."
+    : (c.camera_shifts ? "Camera did not move." : "");
   state.hoop = 0; $("source").textContent = "Showing: " + (label || "–");
   refreshHoopSel(); renderTable(); draw();
 }
@@ -357,7 +362,8 @@ $("save").onclick = async () => {
     const hoops = state.cal.hoops.filter((h) => h.rim_pitch != null || h.board_top_pitch != null);
     await api("/api/calibration/" + encodeURIComponent(state.stem), { method: "POST",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scoreboard: state.cal.scoreboard, hoops,
-        level: { roll_deg: parseFloat($("roll").value) || 0, tilt_deg: parseFloat($("tilt").value) || 0 } }) });
+        level: { roll_deg: parseFloat($("roll").value) || 0, tilt_deg: parseFloat($("tilt").value) || 0 },
+        frame_time_sec: +$("time").value }) });
     setStatus("Saved. Next processing of this video uses it.", "ok");
     state.data = await api("/api/calibration/" + encodeURIComponent(state.stem)); loadList();
   } catch (e) { setStatus("Save failed: " + e.message, "err"); }
