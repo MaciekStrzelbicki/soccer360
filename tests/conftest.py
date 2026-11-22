@@ -133,6 +133,7 @@ def test_config() -> dict:
                 "llm": {"enabled": False},
             },
             "highlights": {
+                "enabled": True,
                 "speed_percentile": 95,
                 "direction_change_deg": 90,
                 "goal_box_regions": [

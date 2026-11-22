@@ -124,6 +124,7 @@ reframer:
   tactical_pitch: -15.0
 
 highlights:
+  enabled: false   # not needed for now; heuristics are not tuned for basketball yet
   # "goal boxes" = areas around the two hoops (normalised x0,y0,x1,y1 in equirect)
   goal_box_regions:
     - [0.22, 0.30, 0.32, 0.55]

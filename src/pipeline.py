@@ -344,15 +344,18 @@ class Pipeline:
             with self._tracked_phase(timer, job_id, "tactical_reframe"):
                 self.reframer.render_tactical(str(input_path), meta, tactical_path)
 
-            # Phase 6: Highlight detection and export
-            logger.info("--- Phase 6: Highlights ---")
-            highlights_dir = work_dir / "highlights"
-            with self._tracked_phase(timer, job_id, "highlights"):
-                self.highlights.detect_and_export(
-                    broadcast_path, meta, camera_path_file,
-                    tracks_path, highlights_dir,
-                    player_cluster_path=player_cluster_path,
-                )
+            # Phase 6: Highlight detection and export (optional)
+            if self.config.get("highlights", {}).get("enabled", True):
+                logger.info("--- Phase 6: Highlights ---")
+                highlights_dir = work_dir / "highlights"
+                with self._tracked_phase(timer, job_id, "highlights"):
+                    self.highlights.detect_and_export(
+                        broadcast_path, meta, camera_path_file,
+                        tracks_path, highlights_dir,
+                        player_cluster_path=player_cluster_path,
+                    )
+            else:
+                logger.info("--- Phase 6: Highlights disabled (highlights.enabled: false) ---")
 
             # Phase 7: Export to final destination
             logger.info("--- Phase 7: Export ---")

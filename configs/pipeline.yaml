@@ -148,6 +148,7 @@ reframer:
   tactical_pitch: -5.0
 
 highlights:
+  enabled: true                     # false = skip Phase 6 (no clips)
   speed_percentile: 95
   direction_change_deg: 90
   goal_box_regions:
