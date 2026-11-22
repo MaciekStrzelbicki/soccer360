@@ -227,6 +227,12 @@ class CameraPathGenerator:
         self.fov_max_rate = cam_cfg.get("fov_max_rate_deg_per_sec", 4.0)
         self.fov_max_accel = cam_cfg.get("fov_max_accel_deg_per_sec2", 4.0)
         self.fov_final_smooth_sec = cam_cfg.get("fov_final_smooth_sec", 0.5)
+        # Zoom only near the hoops (needs hoop yaws via keep_in_frame/calibration)
+        hz = cam_cfg.get("fov_hoop_zoom", {}) or {}
+        self.fov_hoop_zoom_enabled = bool(hz.get("enabled", False))
+        self.fov_hoop_near_deg = float(hz.get("near_deg", 15.0))
+        self.fov_hoop_far_deg = float(hz.get("far_deg", 35.0))
+        self.fov_mid_min = float(hz.get("mid_min_fov", 100.0))
 
         kalman_cfg = cam_cfg.get("kalman", {})
         self.process_noise = kalman_cfg.get("process_noise", 0.1)
@@ -814,6 +820,23 @@ class CameraPathGenerator:
             target = max(target, self.max_fov)
         return target
 
+    def _fov_floor_by_hoop_distance(self, entries: list[dict]) -> np.ndarray:
+        """Minimum FOV from where the camera looks: zoom only near the hoops.
+
+        Within ``near_deg`` (yaw) of a hoop the floor is min_fov; beyond
+        ``far_deg`` it is ``mid_min_fov`` (no zoom mid-court); linear between.
+        Hoops come from keep_in_frame (calibration). No hoops -> no floor.
+        """
+        n = len(entries)
+        if not self.fov_hoop_zoom_enabled or not self.keep_in_frame:
+            return np.full(n, -np.inf)
+        yaw = np.array([e["yaw"] for e in entries], dtype=float)
+        hy = np.array([float(pt["yaw"]) for pt in self.keep_in_frame])
+        d = np.min(np.abs((yaw[:, None] - hy[None, :] + 180.0) % 360.0 - 180.0), axis=1)
+        near, far = self.fov_hoop_near_deg, max(self.fov_hoop_far_deg, self.fov_hoop_near_deg + 1e-6)
+        w = np.clip((d - near) / (far - near), 0.0, 1.0)
+        return self.min_fov + (self.fov_mid_min - self.min_fov) * w
+
     def _compute_fov_cinematic(self, entries: list[dict], fps: float) -> list[dict]:
         """Rare, slow zoom changes.
 
@@ -828,6 +851,7 @@ class CameraPathGenerator:
         lead = int(round(self.pan_lead_sec * fps))
         if 0 < lead < len(target):
             target = np.concatenate([target[lead:], np.full(lead, target[-1])])
+        target = np.maximum(target, self._fov_floor_by_hoop_distance(entries))
         med = max(1, int(round(fps)) | 1)  # ~1 s, odd window
         if len(target) >= med:
             target = median_filter(target, size=med, mode="nearest")

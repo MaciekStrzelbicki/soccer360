@@ -1072,3 +1072,17 @@ class TestCinematicCamera:
         test_config["camera"]["keep_in_frame"] = [{**hoop, "yaw": -130.0}]
         far, _ = self._run(test_config, tmp_work_dir, tracks, name="hoopfar")
         assert all(abs(a["pitch"] - b["pitch"]) < 1e-6 for a, b in zip(far, base))
+
+    def test_fov_hoop_zoom_floor(self, test_config, tmp_work_dir):
+        test_config["camera"]["keep_in_frame"] = [{"yaw": -50.0, "pitch": 80.0, "margin_deg": 0}]
+        test_config["camera"]["fov_hoop_zoom"] = {
+            "enabled": True, "near_deg": 15, "far_deg": 35, "mid_min_fov": 100}
+        gen = CameraPathGenerator(test_config)
+        ents = [{"yaw": y} for y in (-50.0, -40.0, -25.0, 0.0, 120.0)]
+        floor = gen._fov_floor_by_hoop_distance(ents)
+        assert floor[0] == pytest.approx(gen.min_fov)
+        assert floor[1] == pytest.approx(gen.min_fov)
+        assert gen.min_fov < floor[2] < 100
+        assert floor[3] == pytest.approx(100) and floor[4] == pytest.approx(100)
+        test_config["camera"]["fov_hoop_zoom"]["enabled"] = False
+        assert np.all(np.isneginf(CameraPathGenerator(test_config)._fov_floor_by_hoop_distance(ents)))

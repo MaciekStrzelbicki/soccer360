@@ -110,6 +110,7 @@ def test_config() -> dict:
                 "fov_max_rate_deg_per_sec": 4.0,
                 "fov_max_accel_deg_per_sec2": 4.0,
                 "fov_final_smooth_sec": 0.5,
+                "fov_hoop_zoom": {"enabled": False},
                 "kalman": {
                     "process_noise": 0.1,
                     "measurement_noise": 2.0,
