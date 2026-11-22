@@ -328,3 +328,31 @@ def test_cli_dotenv_does_not_override(tmp_path, monkeypatch):
     assert os.environ["FOO_A"] == "1" and os.environ["FOO_B"] == "two"
     assert os.environ["FOO_C"] == "real"
     monkeypatch.delenv("FOO_A"); monkeypatch.delenv("FOO_B")
+
+
+def test_merge_hoops_prefers_llm_yaw_near_play_ends():
+    llm = [{"yaw": -3.7, "rim_pitch": -7.3, "board_top_pitch": -6.5},
+           {"yaw": 61.2, "rim_pitch": -7.2, "board_top_pitch": -4.8}]
+    players = [{"yaw": -50.7, "rim_pitch": -8.6, "board_top_pitch": -3.8},
+               {"yaw": 71.7, "rim_pitch": -6.9, "board_top_pitch": -2.4}]
+    m = cal.merge_hoops(llm, players)
+    assert m[0] == players[0]                      # LLM -3.7 is no play end
+    assert m[1]["yaw"] == 61.2                     # LLM yaw near the end
+    assert m[1]["board_top_pitch"] == -2.4         # higher of the two
+
+
+def test_foi_yaw_range():
+    assert cal._foi_yaw_range({}) == (-180.0, 180.0)
+    c = {"field_of_interest": {"enabled": True, "center_mode": "fixed",
+                               "center_yaw_deg": 0, "yaw_window_deg": 200}}
+    assert cal._foi_yaw_range(c) == (-110.0, 110.0)
+
+
+def test_refine_rejects_answer_outside_window(monkeypatch):
+    pytest.importorskip("openai")
+    monkeypatch.setenv("TEST_OPENAI_KEY", "sk-test")
+    loc = cal.OpenAILocator({"api_key_env": "TEST_OPENAI_KEY"})
+    monkeypatch.setattr(loc, "_ask", lambda p, i: {
+        "found": True, "yaw": -3.7, "rim_pitch": -7, "board_top_pitch": -6})
+    frame = np.zeros((1920, 3840, 3), np.uint8)
+    assert loc._refine(frame, {"yaw": -30, "pitch": -11}, "hoop", "{}", (15, 10)) is None

@@ -503,8 +503,8 @@ class OpenAILocator:
         )
         return json.loads(resp.choices[0].message.content or "{}")
 
-    def locate(self, frame: np.ndarray) -> dict:
-        yr, pr = (-180.0, 180.0), (-45.0, 45.0)
+    def locate(self, frame: np.ndarray, yaw_range=(-180.0, 180.0)) -> dict:
+        yr, pr = tuple(yaw_range), (-45.0, 45.0)
         crop, yr = crop_equirect(frame, yr, pr)
         overview = self._ask(_OVERVIEW_PROMPT, draw_grid(crop, yr, pr, 10.0))
         logger.info("LLM overview: %s", overview)
@@ -551,6 +551,17 @@ class OpenAILocator:
             if not ans.get("found", True):
                 return None
             ans.pop("found", None)
+            # answers outside the crop are made up -> ignore
+            try:
+                y = float(ans["yaw"])
+                ps = [float(ans[k]) for k in ("pitch", "rim_pitch", "board_top_pitch") if k in ans]
+            except (KeyError, TypeError, ValueError):
+                return None
+            if not (yr[0] - 1 <= y <= yr[1] + 1) or any(
+                not (pr[0] - 1 <= v <= pr[1] + 1) for v in ps
+            ):
+                logger.warning("LLM zoom answer outside window, ignored: %s", ans)
+                return None
             return ans
         except Exception as exc:  # noqa: BLE001 - refinement is best-effort
             logger.warning("LLM refine failed for %s: %s", what, exc)
@@ -589,6 +600,45 @@ def clean_hoop(hp: dict | None) -> dict | None:
 # ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
+
+def _foi_yaw_range(config: dict) -> tuple[float, float]:
+    """Yaw window to show the LLM: the field of interest (+ margin)."""
+    foi = config.get("field_of_interest", {}) or {}
+    if not foi.get("enabled") or foi.get("center_mode", "fixed") != "fixed":
+        return (-180.0, 180.0)
+    c = float(foi.get("center_yaw_deg", 0.0))
+    half = float(foi.get("yaw_window_deg", 360.0)) / 2 + 10.0
+    if half >= 180:
+        return (-180.0, 180.0)
+    lo, hi = c - half, c + half
+    if lo < -180 or hi > 180:  # crosses the seam: keep it simple
+        return (-180.0, 180.0)
+    return (lo, hi)
+
+
+def merge_hoops(llm_hoops: list[dict], player_hoops: list[dict],
+                max_dyaw: float = 15.0) -> list[dict]:
+    """Combine LLM hoops with the player-geometry estimate.
+
+    The player estimate says *which* ends of the court are used (robust);
+    an LLM hoop near such an end gives the more exact yaw. Backboard height
+    takes the higher of both (safer: more headroom). LLM hoops that match no
+    end of play are dropped.
+    """
+    out = []
+    for ph in player_hoops:
+        near = [h for h in llm_hoops if abs(h["yaw"] - ph["yaw"]) <= max_dyaw]
+        if not near:
+            out.append(dict(ph))
+            continue
+        lh = min(near, key=lambda h: abs(h["yaw"] - ph["yaw"]))
+        out.append({
+            "yaw": lh["yaw"],
+            "rim_pitch": round(max(lh["rim_pitch"], ph["rim_pitch"]), 2),
+            "board_top_pitch": round(max(lh["board_top_pitch"], ph["board_top_pitch"]), 2),
+        })
+    return out
+
 
 def from_static_config(config: dict) -> dict:
     """Calibration implied by hand-written camera/reframer config values."""
@@ -640,7 +690,10 @@ def resolve_calibration(
     if locator is not None:
         try:
             frame = grab_equirect(video_path, duration_sec * cal_cfg["sample_time_frac"])
-            found = locator.locate(frame)
+            try:
+                found = locator.locate(frame, yaw_range=_foi_yaw_range(config))
+            except TypeError:  # simple locators without yaw_range
+                found = locator.locate(frame)
             result["scoreboard"] = clean_scoreboard(found.get("scoreboard"))
             result["hoops"] = [h for h in map(clean_hoop, found.get("hoops") or []) if h]
             result["source"] = "llm"
@@ -661,11 +714,12 @@ def resolve_calibration(
                             result["scoreboard"], refined)
             result["scoreboard"] = {k: v for k, v in refined.items() if k != "score"}
 
-    if (not result["hoops"] and cal_cfg["hoops_from_players"]
-            and detections_path and det_size):
-        result["hoops"] = estimate_hoops_from_players(
+    if cal_cfg["hoops_from_players"] and detections_path and det_size:
+        player_hoops = estimate_hoops_from_players(
             detections_path, player_cluster_path, det_size[0], det_size[1]
         )
+        if player_hoops:
+            result["hoops"] = merge_hoops(result["hoops"], player_hoops)
 
     # Anything still missing comes from static config
     if not result["scoreboard"]:
