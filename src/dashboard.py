@@ -1312,7 +1312,9 @@ def create_app(config: dict | None = None) -> FastAPI:
             duration = None
         return {"stem": stem, "video_path": str(vp), "duration": duration,
                 "manual": manual, "auto": auto,
-                "config": cal_mod.from_static_config(config)}
+                "config": cal_mod.from_static_config(config),
+                "vertical_correction": float(
+                    config.get("reframer", {}).get("vertical_correction", 0.0) or 0.0)}
 
     @app.get("/api/calibration/{stem}/frame")
     def calibration_frame(stem: str, t: float = 0.0, w: int = 3840):
@@ -1332,15 +1334,53 @@ def create_app(config: dict | None = None) -> FastAPI:
         from fastapi.responses import Response
         return Response(_cal_frame_cache[key], media_type="image/jpeg")
 
+    _cal_raw_cache: dict = {}
+
+    @app.get("/api/calibration/{stem}/view")
+    def calibration_view(stem: str, t: float = 0.0, yaw: float = 0.0, pitch: float = -25.0,
+                         fov: float = 90.0, roll: float = 0.0, tilt: float = 0.0,
+                         k: float = 0.0, w: int = 960):
+        """Perspective preview with levelling + vertical correction."""
+        from .projection import level_rotation, raw_to_world, render_view, zenith_from_roll_tilt
+        import cv2 as _cv2
+        from fastapi.responses import Response
+
+        vp = _cal_video(stem)
+        key = (str(vp), round(t, 1))
+        if key not in _cal_raw_cache:
+            _cal_raw_cache.clear()
+            try:
+                _cal_raw_cache[key] = cal_mod.grab_equirect(vp, t, 3840)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(500, f"Frame read failed: {exc}")
+        frame = _cal_raw_cache[key]
+        w = int(min(max(w, 320), 1920))
+        h = w * 9 // 16
+        R = level_rotation(zenith_from_roll_tilt(roll, tilt)) if (roll or tilt) else None
+        wy, wp = raw_to_world(yaw, pitch, R) if R is not None else (yaw, pitch)
+        img = render_view(frame, w, h, min(max(fov, 20.0), 150.0), wy, wp, R,
+                          min(max(k, 0.0), 1.0))
+        ok, buf = _cv2.imencode(".jpg", img[..., ::-1], [_cv2.IMWRITE_JPEG_QUALITY, 88])
+        return Response(buf.tobytes(), media_type="image/jpeg")
+
     @app.post("/api/calibration/{stem}")
     def calibration_save(stem: str, payload: dict):
         vp = _cal_video(stem)
         sb = cal_mod.clean_scoreboard(payload.get("scoreboard"))
         hoops = [h for h in map(cal_mod.clean_hoop, payload.get("hoops") or []) if h]
-        if not sb and not hoops:
+        level = payload.get("level")
+        if level is not None:
+            try:
+                level = {"roll_deg": float(level.get("roll_deg", 0.0)),
+                         "tilt_deg": float(level.get("tilt_deg", 0.0))}
+            except (TypeError, ValueError, AttributeError):
+                raise HTTPException(400, "Invalid level")
+        if not sb and not hoops and not level:
             raise HTTPException(400, "Nothing to save")
-        path = cal_mod.save_manual(config, vp, {"scoreboard": sb, "hoops": hoops})
-        return {"ok": True, "path": str(path), "scoreboard": sb, "hoops": hoops}
+        path = cal_mod.save_manual(
+            config, vp, {"scoreboard": sb, "hoops": hoops, "level": level})
+        return {"ok": True, "path": str(path), "scoreboard": sb, "hoops": hoops,
+                "level": level}
 
     @app.delete("/api/calibration/{stem}/manual")
     def calibration_clear(stem: str):

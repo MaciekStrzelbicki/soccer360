@@ -58,6 +58,7 @@ def calibration_config(config: dict) -> dict:
     cal.setdefault("refine_scoreboard", True)
     cal.setdefault("hoops_from_players", True)
     cal.setdefault("hoop_margin_deg", 3.0)
+    cal.setdefault("estimate_level", True)   # camera roll/tilt from vertical lines
     llm = dict(cal.get("llm", {}) or {})
     llm.setdefault("enabled", False)
     llm.setdefault("provider", "openai")
@@ -81,7 +82,7 @@ def load_manual(config: dict, video_path: str | Path) -> dict | None:
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Ignoring unreadable calibration %s: %s", p, exc)
         return None
-    if not data.get("scoreboard") and not data.get("hoops"):
+    if not data.get("scoreboard") and not data.get("hoops") and not data.get("level"):
         return None  # registered for the UI but not calibrated yet
     data["source"] = "manual"
     return data
@@ -96,6 +97,11 @@ def save_manual(config: dict, video_path: str | Path, data: dict) -> Path:
         "scoreboard": data.get("scoreboard"),
         "hoops": data.get("hoops") or [],
     }
+    if data.get("level"):
+        out["level"] = {
+            "roll_deg": float(data["level"].get("roll_deg", 0.0)),
+            "tilt_deg": float(data["level"].get("tilt_deg", 0.0)),
+        }
     p.write_text(json.dumps(out, indent=2))
     return p
 
@@ -651,6 +657,10 @@ def from_static_config(config: dict) -> dict:
             "width_deg": round(fov_h / 1.1, 2),
             "height_deg": round(fov_h / float(ov.get("aspect", 1.9)) / 1.1, 2),
         }
+    lvl = config.get("reframer", {}).get("level") or {}
+    if lvl.get("enabled") and (lvl.get("roll_deg") or lvl.get("tilt_deg")):
+        out["level"] = {"roll_deg": float(lvl.get("roll_deg", 0.0)),
+                        "tilt_deg": float(lvl.get("tilt_deg", 0.0))}
     for pt in config.get("camera", {}).get("keep_in_frame") or []:
         out["hoops"].append({
             "yaw": float(pt["yaw"]), "rim_pitch": float(pt["pitch"]) - 3.0,
@@ -678,6 +688,8 @@ def resolve_calibration(
     manual = load_manual(config, video_path)
     if manual:
         logger.info("Calibration: manual (%s)", manual_path(config, video_path))
+        if not manual.get("level") and cal_cfg["estimate_level"]:
+            manual["level"] = _estimate_level(video_path, duration_sec, cal_cfg)
         return manual
 
     result = {"source": "auto", "scoreboard": None, "hoops": []}
@@ -699,6 +711,9 @@ def resolve_calibration(
             result["source"] = "llm"
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM calibration failed, falling back: %s", exc)
+
+    if cal_cfg["estimate_level"]:
+        result["level"] = _estimate_level(video_path, duration_sec, cal_cfg)
 
     if cal_cfg["refine_scoreboard"]:
         try:
@@ -726,9 +741,26 @@ def resolve_calibration(
         result["scoreboard"] = static["scoreboard"]
     if not result["hoops"]:
         result["hoops"] = static["hoops"]
-    logger.info("Calibration (%s): scoreboard=%s hoops=%s",
-                result["source"], result["scoreboard"], result["hoops"])
+    logger.info("Calibration (%s): scoreboard=%s hoops=%s level=%s",
+                result["source"], result["scoreboard"], result["hoops"],
+                result.get("level"))
     return result
+
+
+def _estimate_level(video_path, duration_sec, cal_cfg) -> dict | None:
+    """Camera roll/tilt from vertical structures in one frame."""
+    from .projection import estimate_zenith, roll_tilt_from_zenith
+
+    try:
+        frame = grab_equirect(video_path, duration_sec * cal_cfg["sample_time_frac"])
+        z, inliers = estimate_zenith(frame)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Level estimate failed: %s", exc)
+        return None
+    if z is None:
+        return None
+    roll, tilt = roll_tilt_from_zenith(z)
+    return {"roll_deg": round(roll, 2), "tilt_deg": round(tilt, 2), "inliers": inliers}
 
 
 def apply_calibration(cal: dict, camera, reframer, config: dict) -> None:
@@ -739,6 +771,13 @@ def apply_calibration(cal: dict, camera, reframer, config: dict) -> None:
             {"yaw": h["yaw"], "pitch": h["board_top_pitch"], "margin_deg": margin}
             for h in cal["hoops"]
         ]
+    lvl = cal.get("level")
+    if lvl and getattr(reframer, "level_enabled", False):
+        from .projection import zenith_from_roll_tilt
+
+        reframer.level_zenith = zenith_from_roll_tilt(
+            float(lvl.get("roll_deg", 0.0)), float(lvl.get("tilt_deg", 0.0))
+        )
     sb = cal.get("scoreboard")
     if sb and reframer.scoreboard_overlay is not None:
         ov = dict(reframer.scoreboard_overlay)

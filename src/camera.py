@@ -211,6 +211,10 @@ class CameraPathGenerator:
         self.keep_in_frame = cam_cfg.get("keep_in_frame", []) or []
         out_res = config.get("reframer", {}).get("output_resolution", [1920, 1080])
         self.output_aspect = out_res[1] / out_res[0] if out_res[0] else 9 / 16
+        # keystone correction changes where the top edge of the frame is
+        self.vertical_correction = float(
+            config.get("reframer", {}).get("vertical_correction", 0.0) or 0.0
+        )
         self.pan_deadzone_deg = cam_cfg.get("pan_deadzone_deg", 5.0)
         self.pitch_deadzone_deg = cam_cfg.get("pitch_deadzone_deg", 3.0)
         self.pan_response_sec = cam_cfg.get("pan_response_sec", 0.6)
@@ -885,7 +889,11 @@ class CameraPathGenerator:
             d = np.abs([angle_diff(p_yaw, y) for y in yaw])
             # weight 1 while inside the frame, ramps to 0 over 15 deg outside
             w = np.clip((half_h + 15.0 - d) / 15.0, 0.0, 1.0)
-            need = np.maximum(0.0, (p_pitch + margin) - (pitch + half_v))
+            k = self.vertical_correction
+            top = pitch * (1 - k) + np.degrees(np.arctan(
+                np.tan(np.radians(half_v)) + np.tan(np.radians(pitch * k))
+            ))
+            need = np.maximum(0.0, (p_pitch + margin) - top)
             raise_by = np.maximum(raise_by, w * need)
         # Dilate (1.5 s) then smooth (sigma 0.4 s): the Gaussian alone would
         # shave the peaks, dilating first keeps the requirement covered.

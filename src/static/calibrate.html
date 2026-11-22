@@ -45,7 +45,7 @@
   .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   td, th { padding: 3px 4px; text-align: left; border-bottom: 1px solid var(--border); }
-  td input { width: 64px; background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 2px 4px; }
+  label input, td input { width: 64px; background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 2px 4px; }
   .status { margin-top: 8px; font-size: 12px; min-height: 18px; }
   .status.err { color: var(--red); } .status.ok { color: var(--green); }
   #sbPreview { width: 100%; border-radius: 8px; border: 1px solid var(--border); background: #000; margin-top: 6px; }
@@ -71,6 +71,13 @@
       <button id="loadConfig">Load config</button>
       <button id="loadManual">Load saved</button>
     </div>
+
+    <h2>Level &amp; verticals</h2>
+    <div class="row">
+      <label class="muted">roll° <input id="roll" type="number" step="0.1" value="0" style="width:70px"></label>
+      <label class="muted">tilt° <input id="tilt" type="number" step="0.1" value="0" style="width:70px"></label>
+    </div>
+    <p class="muted" id="levelInfo" style="margin-top:4px">–</p>
 
     <h2>Scoreboard cut</h2>
     <canvas id="sbPreview" height="120"></canvas>
@@ -107,6 +114,16 @@
       <span><i class="dot" style="background:var(--magenta)"></i>backboard top (kept in frame)</span>
       <span class="muted">Wheel = zoom, drag = move (in Move mode). Coordinates: yaw −180…180°, pitch −90…90°.</span>
     </div>
+    <h2>Broadcast preview (level + vertical correction)</h2>
+    <div class="row" style="margin-bottom:6px">
+      <label class="muted">yaw <input id="pvYaw" type="range" min="-180" max="180" value="0" style="width:180px"></label>
+      <label class="muted">pitch <input id="pvPitch" type="range" min="-60" max="20" value="-25" style="width:120px"></label>
+      <label class="muted">fov <input id="pvFov" type="range" min="50" max="120" value="85" style="width:120px"></label>
+      <label class="muted">vertical corr. <input id="pvK" type="range" min="0" max="100" value="0" style="width:120px"></label>
+      <span class="muted" id="pvLabel"></span>
+    </div>
+    <img id="pv" alt="preview" style="width:100%;max-width:960px;border-radius:10px;border:1px solid var(--border);background:#000;aspect-ratio:16/9">
+    <p class="muted">Vertical correction is a config setting (reframer.vertical_correction); the slider only previews it.</p>
   </main>
 </div>
 
@@ -151,15 +168,20 @@ async function openVideo(stem) {
   state.duration = state.data.duration || 0;
   const pick = state.data.manual || state.data.auto || state.data.config;
   useCal(pick, state.data.manual ? "saved (manual)" : state.data.auto ? "auto (" + state.data.auto.source + ")" : "config");
+  $("pvK").value = Math.round((state.data.vertical_correction || 0) * 100);
   $("time").max = Math.max(1, Math.floor(state.duration));
   $("time").value = Math.floor(state.duration / 2);
   await loadFrame();
+  refreshPreview();
 }
 
 function useCal(c, label) {
   c = c || {};
   state.cal = { scoreboard: c.scoreboard ? { ...c.scoreboard } : null,
                 hoops: (c.hoops || []).map((h) => ({ ...h })) };
+  const lv = c.level || null;
+  $("roll").value = lv ? lv.roll_deg : 0; $("tilt").value = lv ? lv.tilt_deg : 0;
+  $("levelInfo").textContent = lv ? `camera roll ${lv.roll_deg}°, tilt ${lv.tilt_deg}°` + (lv.inliers ? ` (from ${lv.inliers} vertical lines)` : "") : "no level measured";
   state.hoop = 0; $("source").textContent = "Showing: " + (label || "–");
   refreshHoopSel(); renderTable(); draw();
 }
@@ -313,7 +335,19 @@ function renderTable() {
   });
 }
 
-$("time").onchange = loadFrame;
+let pvTimer = null;
+function refreshPreview() {
+  clearTimeout(pvTimer);
+  pvTimer = setTimeout(() => {
+    if (!state.stem) return;
+    const q = new URLSearchParams({ t: $("time").value, yaw: $("pvYaw").value, pitch: $("pvPitch").value,
+      fov: $("pvFov").value, roll: $("roll").value || 0, tilt: $("tilt").value || 0, k: $("pvK").value / 100, w: 960 });
+    $("pvLabel").textContent = `yaw ${$("pvYaw").value}° · pitch ${$("pvPitch").value}° · fov ${$("pvFov").value}° · corr ${$("pvK").value}%`;
+    $("pv").src = `/api/calibration/${encodeURIComponent(state.stem)}/view?${q}`;
+  }, 200);
+}
+["pvYaw", "pvPitch", "pvFov", "pvK", "roll", "tilt"].forEach((id) => $(id).addEventListener("input", refreshPreview));
+$("time").onchange = () => { loadFrame(); refreshPreview(); };
 $("loadAuto").onclick = () => state.data && state.data.auto ? useCal(state.data.auto, "auto (" + state.data.auto.source + ")") : setStatus("No auto result yet", "err");
 $("loadConfig").onclick = () => state.data && useCal(state.data.config, "config");
 $("loadManual").onclick = () => state.data && state.data.manual ? useCal(state.data.manual, "saved (manual)") : setStatus("Nothing saved yet", "err");
@@ -322,7 +356,8 @@ $("save").onclick = async () => {
   try {
     const hoops = state.cal.hoops.filter((h) => h.rim_pitch != null || h.board_top_pitch != null);
     await api("/api/calibration/" + encodeURIComponent(state.stem), { method: "POST",
-      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scoreboard: state.cal.scoreboard, hoops }) });
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scoreboard: state.cal.scoreboard, hoops,
+        level: { roll_deg: parseFloat($("roll").value) || 0, tilt_deg: parseFloat($("tilt").value) || 0 } }) });
     setStatus("Saved. Next processing of this video uses it.", "ok");
     state.data = await api("/api/calibration/" + encodeURIComponent(state.stem)); loadList();
   } catch (e) { setStatus("Save failed: " + e.message, "err"); }

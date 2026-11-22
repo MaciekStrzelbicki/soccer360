@@ -124,6 +124,8 @@ def test_config() -> dict:
                 "tactical_yaw": 0.0,
                 "tactical_pitch": -5.0,
                 "scoreboard_overlay": {"enabled": False},
+                "vertical_correction": 0.0,
+                "level": {"enabled": False, "roll_deg": 0.0, "tilt_deg": 0.0},
             },
             "calibration": {
                 "enabled": False,

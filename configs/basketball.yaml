@@ -103,6 +103,11 @@ reframer:
   source_downscale: [5760, 2880]   # 8K source; sharper when zoomed to ~62 deg
   # Live scoreboard picture-in-picture, cut from the 360 frame each frame.
   # yaw/pitch = scoreboard centre measured on the 8K frame (camera-specific).
+  # Elevated camera looks down ~25-35 deg: straighten verticals (75%) and
+  # level the horizon (roll/tilt measured per video by calibration).
+  vertical_correction: 0.75
+  level:
+    enabled: true
   scoreboard_overlay:
     enabled: true
     yaw: 8.2

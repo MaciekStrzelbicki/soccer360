@@ -18,6 +18,13 @@ import cv2
 import numpy as np
 import py360convert
 
+from .projection import (
+    level_rotation,
+    raw_to_world,
+    render_view,
+    view_maps,
+    zenith_from_roll_tilt,
+)
 from .utils import (
     FFmpegFrameReader,
     FFmpegFrameWriter,
@@ -101,6 +108,7 @@ def _render_segment(
     output_path: str,
     overlap_frames: int = 0,
     overlay: dict | None = None,
+    projection: dict | None = None,
 ):
     """Render a range of frames as a video segment. Runs in worker process.
 
@@ -147,14 +155,23 @@ def _render_segment(
                 2 * math.atan(math.tan(math.radians(fov_h / 2)) * (out_h / out_w))
             )
 
-            perspective = py360convert.e2p(
-                frame,
-                fov_deg=(fov_h, fov_v),
-                u_deg=cam["yaw"],
-                v_deg=cam["pitch"],
-                out_hw=(out_h, out_w),
-                mode="bilinear",
-            )
+            if projection:
+                # levelled + vertical-corrected view; path angles are raw-frame
+                R = np.asarray(projection["R"])
+                wy, wp = raw_to_world(cam["yaw"], cam["pitch"], R)
+                perspective = render_view(
+                    frame, out_w, out_h, fov_h, wy, wp, R,
+                    projection.get("k", 0.0),
+                )
+            else:
+                perspective = py360convert.e2p(
+                    frame,
+                    fov_deg=(fov_h, fov_v),
+                    u_deg=cam["yaw"],
+                    v_deg=cam["pitch"],
+                    out_hw=(out_h, out_w),
+                    mode="bilinear",
+                )
 
             # Skip overlap warmup frames
             if i >= skip_count:
@@ -191,6 +208,7 @@ def _render_tactical_segment(
     preset: str,
     output_path: str,
     overlap_frames: int = 0,
+    projection: dict | None = None,
 ):
     """Render tactical wide-angle segment with fixed camera. Worker process.
 
@@ -220,16 +238,30 @@ def _render_tactical_segment(
     )
 
     written = 0
+    maps = None
     try:
         for i, frame in enumerate(reader):
-            perspective = py360convert.e2p(
-                frame,
-                fov_deg=(tactical_fov, fov_v),
-                u_deg=tactical_yaw,
-                v_deg=tactical_pitch,
-                out_hw=(out_h, out_w),
-                mode="bilinear",
-            )
+            if projection:
+                if maps is None:  # fixed camera: one map for the whole segment
+                    R = np.asarray(projection["R"])
+                    wy, wp = raw_to_world(tactical_yaw, tactical_pitch, R)
+                    maps = view_maps(
+                        frame.shape[1], frame.shape[0], out_w, out_h,
+                        tactical_fov, wy, wp, R, projection.get("k", 0.0),
+                    )
+                perspective = cv2.remap(
+                    frame, maps[0], maps[1], cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_WRAP,
+                )
+            else:
+                perspective = py360convert.e2p(
+                    frame,
+                    fov_deg=(tactical_fov, fov_v),
+                    u_deg=tactical_yaw,
+                    v_deg=tactical_pitch,
+                    out_hw=(out_h, out_w),
+                    mode="bilinear",
+                )
             if i >= skip_count:
                 writer.write(perspective)
                 written += 1
@@ -265,6 +297,15 @@ class Reframer:
         # Picture-in-picture of a fixed region of the 360 frame (scoreboard).
         ov = ref_cfg.get("scoreboard_overlay") or {}
         self.scoreboard_overlay = dict(ov) if ov.get("enabled", False) else None
+        # Vertical (keystone) correction 0..1 and horizon levelling.
+        self.vertical_correction = float(ref_cfg.get("vertical_correction", 0.0) or 0.0)
+        lvl = ref_cfg.get("level") or {}
+        self.level_zenith = None
+        self.level_enabled = bool(lvl.get("enabled", False))
+        if self.level_enabled:
+            roll, tilt = float(lvl.get("roll_deg", 0.0)), float(lvl.get("tilt_deg", 0.0))
+            if roll or tilt:
+                self.level_zenith = zenith_from_roll_tilt(roll, tilt)
 
         self.codec = exp_cfg.get("codec", "libx264")
         self.crf = exp_cfg.get("crf", 18)
@@ -274,6 +315,15 @@ class Reframer:
         encoder = exp_cfg.get("encoder", "cpu")
         if encoder == "nvenc":
             self.codec = "h264_nvenc"
+
+    def _projection(self) -> dict | None:
+        """Picklable projection settings for workers (None = plain e2p)."""
+        if self.vertical_correction <= 0 and self.level_zenith is None:
+            return None
+        return {
+            "R": level_rotation(self.level_zenith).tolist(),
+            "k": self.vertical_correction,
+        }
 
     def _resolve_source_dims(self, meta: VideoMeta) -> tuple[int, int] | None:
         """Resolve source dimensions. None means no rescaling (native res)."""
@@ -343,6 +393,7 @@ class Reframer:
                         str(seg_path),
                         overlap_frames if i > 0 else 0,
                         self.scoreboard_overlay,
+                        self._projection(),
                     ))
                     offset += n
 
@@ -424,6 +475,7 @@ class Reframer:
                         self.preset,
                         str(seg_path),
                         overlap_frames if i > 0 else 0,
+                        self._projection(),
                     ))
                     offset += n
 

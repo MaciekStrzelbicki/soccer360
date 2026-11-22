@@ -362,3 +362,23 @@ def test_merge_hoops_rejects_llm_hoop_too_far_from_play_end():
     llm = [{"yaw": -36.9, "rim_pitch": -6.9, "board_top_pitch": -5.7}]
     players = [{"yaw": -50.65, "rim_pitch": -8.6, "board_top_pitch": -3.8}]
     assert cal.merge_hoops(llm, players)[0]["yaw"] == -50.65
+
+
+def test_dashboard_view_preview_and_level_save(tmp_path, synthetic_video):
+    from fastapi.testclient import TestClient
+    from src.dashboard import create_app
+
+    ingest = tmp_path / "ingest"
+    ingest.mkdir()
+    (ingest / "g.mp4").write_bytes(Path(synthetic_video).read_bytes())
+    c = TestClient(create_app({
+        "paths": {"ingest": str(ingest)}, "dashboard": {"db_path": str(tmp_path / "d.db")},
+        "calibration": {"enabled": True, "dir": str(tmp_path / "cal")},
+        "reframer": {"vertical_correction": 0.75}}))
+    r = c.get("/api/calibration/g/view?t=1&yaw=10&pitch=-20&fov=90&roll=1&tilt=-0.5&k=0.75&w=320")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    assert c.get("/api/calibration/g").json()["vertical_correction"] == 0.75
+    r = c.post("/api/calibration/g", json={"level": {"roll_deg": 1.2, "tilt_deg": -0.3}})
+    assert r.status_code == 200
+    m = c.get("/api/calibration/g").json()["manual"]
+    assert m["level"] == {"roll_deg": 1.2, "tilt_deg": -0.3}

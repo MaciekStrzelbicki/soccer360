@@ -81,6 +81,7 @@ class Pipeline:
         # config values to restore between jobs.
         self._base_keep_in_frame = list(getattr(self.camera, "keep_in_frame", []) or [])
         self._base_scoreboard_overlay = getattr(self.reframer, "scoreboard_overlay", None)
+        self._base_level_zenith = getattr(self.reframer, "level_zenith", None)
         self.highlights = HighlightDetector(config)
         self.exporter = Exporter(config)
 
@@ -118,6 +119,7 @@ class Pipeline:
             return
         self.camera.keep_in_frame = list(self._base_keep_in_frame)
         self.reframer.scoreboard_overlay = self._base_scoreboard_overlay
+        self.reframer.level_zenith = self._base_level_zenith
         logger.info("--- Phase 2.9: Venue Calibration ---")
         try:
             with self._tracked_phase(timer, job_id, "calibration"):

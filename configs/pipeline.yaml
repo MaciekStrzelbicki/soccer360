@@ -134,6 +134,15 @@ reframer:
   # border_px, opacity.
   scoreboard_overlay:
     enabled: false
+  # Keystone correction 0..1: keep world verticals vertical when the view
+  # looks down (shift-lens style). 0 = plain perspective (py360convert).
+  vertical_correction: 0.0
+  # Horizon levelling for a tilted 360 camera. With calibration enabled the
+  # roll/tilt are measured per video; these are the fallback values.
+  level:
+    enabled: false
+    roll_deg: 0.0
+    tilt_deg: 0.0
   tactical_fov: 120
   tactical_yaw: 0.0
   tactical_pitch: -5.0
