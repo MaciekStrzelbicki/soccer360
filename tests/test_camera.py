@@ -1028,3 +1028,47 @@ class TestCinematicCamera:
         assert yl[150] > yb[150] + 5.0
         first_move = lambda y: int(np.argmax(y > y[0] + 1.0))
         assert first_move(yl) < first_move(yb)
+
+    def test_hold_and_move_ignores_small_wander(self, test_config, tmp_work_dir):
+        """Slow wander below the trigger: camera stands still."""
+        test_config["camera"]["pan_hold_trigger_deg"] = 12.0
+        tracks = [
+            {"frame": i, "ball": self._ball_at_yaw(
+                test_config, 8.0 * math.sin(i / 60.0))}
+            for i in range(600)
+        ]
+        path, _ = self._run(test_config, tmp_work_dir, tracks, name="hold")
+        yaw = self._yaw(path)
+        assert yaw.max() - yaw.min() < 1.0
+
+    def test_hold_and_move_follows_big_move(self, test_config, tmp_work_dir):
+        test_config["camera"]["pan_hold_trigger_deg"] = 12.0
+        tracks = [
+            {"frame": i, "ball": self._ball_at_yaw(
+                test_config, -40.0 if i < 150 else 40.0)}
+            for i in range(450)
+        ]
+        path, gen = self._run(test_config, tmp_work_dir, tracks, name="holdbig")
+        yaw = self._yaw(path)
+        assert abs(yaw[-1] - 40.0) < 3.0
+        d = np.diff(yaw)
+        assert np.max(np.abs(d)) * self.FPS <= gen.max_fast_pan_speed + 1e-6
+
+    def test_keep_in_frame_raises_pitch_for_hoop(self, test_config, tmp_work_dir):
+        tracks = [
+            {"frame": i, "ball": self._ball_at_yaw(test_config, 50.0)}
+            for i in range(300)
+        ]
+        # ball at pitch 0 (row centre); hoop well above the top edge
+        hoop = {"yaw": 50.0, "pitch": 45.0, "margin_deg": 3.0}
+        base, _ = self._run(test_config, tmp_work_dir, tracks, name="nohoop")
+        test_config["camera"]["keep_in_frame"] = [hoop]
+        path, gen = self._run(test_config, tmp_work_dir, tracks, name="hoop")
+        for e in path[30:-30]:
+            half_v = math.degrees(math.atan(
+                math.tan(math.radians(e["fov"] / 2)) * gen.output_aspect))
+            assert e["pitch"] + half_v >= hoop["pitch"] + hoop["margin_deg"] - 0.5
+        # far from the hoop nothing changes
+        test_config["camera"]["keep_in_frame"] = [{**hoop, "yaw": -130.0}]
+        far, _ = self._run(test_config, tmp_work_dir, tracks, name="hoopfar")
+        assert all(abs(a["pitch"] - b["pitch"]) < 1e-6 for a, b in zip(far, base))

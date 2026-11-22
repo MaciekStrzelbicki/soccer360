@@ -15,7 +15,7 @@ import math
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d, median_filter
+from scipy.ndimage import gaussian_filter1d, maximum_filter1d, median_filter
 
 from .utils import VideoMeta, load_json, pixel_to_yaw_pitch, write_json
 
@@ -69,6 +69,49 @@ def _leash(x: np.ndarray, radius: float) -> np.ndarray:
             h = v - radius
         elif h - v > radius:
             h = v + radius
+        out[i] = h
+    return out
+
+
+def _hold_and_move(
+    x: np.ndarray,
+    fps: float,
+    trigger: float,
+    settle_speed: float,
+    settle_sec: float,
+) -> np.ndarray:
+    """Hold still, then move decisively (no small corrective drifts).
+
+    HOLD: output frozen until x is more than ``trigger`` away.
+    MOVE: output tracks x until x has been slower than ``settle_speed``
+    (deg/s) for ``settle_sec``; then it freezes at x again.
+
+    Offline: velocity uses a centred window. The step at the start of a move
+    is smoothed out downstream by the accel-limited follower.
+    """
+    n = len(x)
+    if trigger <= 0 or n == 0:
+        return x.astype(float, copy=True)
+    k = max(1, int(round(0.25 * fps)))
+    v = np.empty(n)
+    for i in range(n):
+        a, b = max(0, i - k), min(n - 1, i + k)
+        v[i] = (x[b] - x[a]) * fps / max(b - a, 1)
+    settle_n = max(1, int(round(settle_sec * fps)))
+    out = np.empty(n)
+    h = float(x[0])
+    moving = False
+    slow = 0
+    for i in range(n):
+        if not moving:
+            if abs(x[i] - h) > trigger:
+                moving = True
+                slow = 0
+        if moving:
+            h = float(x[i])
+            slow = slow + 1 if abs(v[i]) < settle_speed else 0
+            if slow >= settle_n:
+                moving = False
         out[i] = h
     return out
 
@@ -157,6 +200,17 @@ class CameraPathGenerator:
         # Offline anticipation: follow where the play will be pan_lead_sec
         # from now (compensates follow lag and the cluster arriving late).
         self.pan_lead_sec = cam_cfg.get("pan_lead_sec", 0.0)
+        # Hold-and-move (replaces the leash when trigger > 0): camera stands
+        # still and only moves when the play is > trigger away.
+        self.pan_hold_trigger_deg = cam_cfg.get("pan_hold_trigger_deg", 0.0)
+        self.pitch_hold_trigger_deg = cam_cfg.get("pitch_hold_trigger_deg", 0.0)
+        self.pan_settle_speed = cam_cfg.get("pan_settle_speed_deg_per_sec", 4.0)
+        self.pan_settle_sec = cam_cfg.get("pan_settle_sec", 0.5)
+        # Points (e.g. hoops) kept inside the top of the frame when the
+        # camera looks their way: [{yaw, pitch, margin_deg}].
+        self.keep_in_frame = cam_cfg.get("keep_in_frame", []) or []
+        out_res = config.get("reframer", {}).get("output_resolution", [1920, 1080])
+        self.output_aspect = out_res[1] / out_res[0] if out_res[0] else 9 / 16
         self.pan_deadzone_deg = cam_cfg.get("pan_deadzone_deg", 5.0)
         self.pitch_deadzone_deg = cam_cfg.get("pitch_deadzone_deg", 3.0)
         self.pan_response_sec = cam_cfg.get("pan_response_sec", 0.6)
@@ -293,6 +347,7 @@ class CameraPathGenerator:
                     entry["spread_x_deg"] = last_spread
         if cinematic:
             camera_path = self._compute_fov_cinematic(clamped, fps)
+            camera_path = self._apply_keep_in_frame(camera_path, fps)
         else:
             camera_path = self._compute_fov(clamped, fps)
 
@@ -697,12 +752,17 @@ class CameraPathGenerator:
         yaw = np.array(unwrap_angles([e["yaw"] for e in entries]), dtype=float)
         pitch = np.array([e["pitch"] for e in entries], dtype=float)
 
-        def process(x: np.ndarray, deadzone: float) -> np.ndarray:
+        def process(x: np.ndarray, deadzone: float, trigger: float) -> np.ndarray:
             x = _gaussian_zero_phase(x, self.pan_presmooth_sec * fps)
             lead = int(round(self.pan_lead_sec * fps))
             if 0 < lead < len(x):
                 x = np.concatenate([x[lead:], np.full(lead, x[-1])])
-            x = _leash(x, deadzone)
+            if trigger > 0:
+                x = _hold_and_move(
+                    x, fps, trigger, self.pan_settle_speed, self.pan_settle_sec
+                )
+            else:
+                x = _leash(x, deadzone)
             x = _limited_follow(
                 x, fps,
                 max_speed=self.max_fast_pan_speed,
@@ -711,8 +771,10 @@ class CameraPathGenerator:
             )
             return _gaussian_zero_phase(x, self.pan_final_smooth_sec * fps)
 
-        yaw_s = process(yaw, self.pan_deadzone_deg)
-        pitch_s = process(pitch, self.pitch_deadzone_deg)
+        yaw_s = process(yaw, self.pan_deadzone_deg, self.pan_hold_trigger_deg)
+        pitch_s = process(
+            pitch, self.pitch_deadzone_deg, self.pitch_hold_trigger_deg
+        )
 
         out = []
         for e, y, p in zip(entries, yaw_s, pitch_s):
@@ -798,6 +860,43 @@ class CameraPathGenerator:
             }
             for e, f in zip(entries, fov)
         ]
+
+    def _apply_keep_in_frame(self, path: list[dict], fps: float) -> list[dict]:
+        """Raise pitch so configured points (hoops) stay below the top edge.
+
+        Active with a smooth weight while the point is horizontally inside
+        (or near) the frame; the pitch correction is Gaussian-smoothed so
+        it never produces its own jerky motion.
+        """
+        if not self.keep_in_frame or not path:
+            return path
+        yaw = np.array([e["yaw"] for e in path], dtype=float)
+        pitch = np.array([e["pitch"] for e in path], dtype=float)
+        fov = np.array([e["fov"] for e in path], dtype=float)
+        half_h = fov / 2.0
+        half_v = np.degrees(
+            np.arctan(np.tan(np.radians(half_h)) * self.output_aspect)
+        )
+        raise_by = np.zeros(len(path))
+        for pt in self.keep_in_frame:
+            p_yaw = float(pt["yaw"])
+            p_pitch = float(pt["pitch"])
+            margin = float(pt.get("margin_deg", 3.0))
+            d = np.abs([angle_diff(p_yaw, y) for y in yaw])
+            # weight 1 while inside the frame, ramps to 0 over 15 deg outside
+            w = np.clip((half_h + 15.0 - d) / 15.0, 0.0, 1.0)
+            need = np.maximum(0.0, (p_pitch + margin) - (pitch + half_v))
+            raise_by = np.maximum(raise_by, w * need)
+        # Dilate (1.5 s) then smooth (sigma 0.4 s): the Gaussian alone would
+        # shave the peaks, dilating first keeps the requirement covered.
+        size = max(1, int(round(1.5 * fps)) | 1)
+        smooth = _gaussian_zero_phase(
+            maximum_filter1d(raise_by, size=size, mode="nearest"), 0.4 * fps
+        )
+        out = []
+        for e, r in zip(path, smooth):
+            out.append({**e, "pitch": float(np.clip(e["pitch"] + r, -89.0, 89.0))})
+        return out
 
     def _compute_fov(self, entries: list[dict], fps: float) -> list[dict]:
         """Compute per-frame FOV based on ball velocity and lost state.

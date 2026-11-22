@@ -96,6 +96,11 @@ camera:
   smoothing_mode: cinematic
   pan_presmooth_sec: 0.3            # zero-phase Gaussian sigma on raw target
   pan_lead_sec: 0.0                 # offline anticipation (s); basketball uses 0.7
+  pan_hold_trigger_deg: 0.0         # >0: hold still, move only when play is > this away (yaw)
+  pitch_hold_trigger_deg: 0.0
+  pan_settle_speed_deg_per_sec: 4.0 # hold again once target slower than this ...
+  pan_settle_sec: 0.5               # ... for this long
+  keep_in_frame: []                 # [{yaw, pitch, margin_deg}] kept below top edge (e.g. hoops)
   pan_deadzone_deg: 5.0             # continuous yaw dead-zone (leash radius)
   pitch_deadzone_deg: 3.0
   pan_response_sec: 0.6             # follow time constant

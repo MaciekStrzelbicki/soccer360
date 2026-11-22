@@ -74,6 +74,18 @@ camera:
   pan_lead_sec: 0.7       # anticipate: start moving before players reach the other half
   fov_max_rate_deg_per_sec: 8.0   # half-court switch zooms out/in within ~3-5 s
   fov_max_accel_deg_per_sec2: 8.0
+  # Hold still, then move decisively: no small corrective drifts.
+  pan_hold_trigger_deg: 12.0
+  pitch_hold_trigger_deg: 10.0
+  pan_settle_speed_deg_per_sec: 4.0
+  pan_settle_sec: 0.5
+  # Elevated camera (1st-floor balcony): when zoomed on a basket, raise the
+  # frame so the backboard stays in view. yaw/pitch = top edge of each
+  # backboard, measured on the 8K equirect frame. Re-measure if the camera
+  # position or heading changes.
+  keep_in_frame:
+    - {yaw: -51.2, pitch: -3.9, margin_deg: 3.0}   # left basket
+    - {yaw: 62.6, pitch: -2.7, margin_deg: 3.0}    # right basket
 
 center_of_play:
   # Ball is in someone's hands most of the time -> lean on the player cluster.
