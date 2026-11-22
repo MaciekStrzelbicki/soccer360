@@ -68,6 +68,9 @@ camera:
   deadband_deg: 3.0
   lookahead_frames: 5
   lookahead_max_deg: 15.0
+  # cinematic smoothing: faster ease-in for fast breaks (pipeline.yaml: 45 / 0.6)
+  max_pan_accel_deg_per_sec2: 90.0
+  pan_response_sec: 0.45
 
 center_of_play:
   # Ball is in someone's hands most of the time -> lean on the player cluster.
