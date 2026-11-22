@@ -82,6 +82,12 @@ Multi-stage smoothing in `src/camera.py` prevents jitter in the broadcast output
 
 Key config: `camera.fov_ema_alpha`, `camera.deadband_deg`, `camera.velocity_threshold_deg_per_sec`, `camera.ema_alpha`
 
+**Default is `camera.smoothing_mode: cinematic`** (stages 3–6 above are the `legacy` mode). Cinematic is offline/two-pass:
+zero-phase Gaussian pre-smooth → continuous dead-zone "leash" (`pan_deadzone_deg`, no hold-then-jump staircase) →
+velocity+acceleration-limited follow (`max_pan_accel_deg_per_sec2`, `pan_response_sec`) → light Gaussian.
+Zoom: spread-only target (`fov_from_speed: false`), ~1 s median + `fov_presmooth_sec` Gaussian, hysteresis hold
+(`fov_hysteresis_deg`, `fov_min_hold_sec`), rate/accel-limited transitions (`fov_max_rate_deg_per_sec`). Lost-ball widening only after `lost_coast_frames`.
+
 ## Monitoring Dashboard
 
 - **Port 8088** (avoids Label Studio on 8080)

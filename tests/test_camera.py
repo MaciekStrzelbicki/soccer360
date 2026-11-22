@@ -429,6 +429,7 @@ class TestFOVSmoothing:
 
     def test_fov_gradual_transition_on_ball_loss(self, test_config, tmp_work_dir):
         """FOV should widen gradually when ball is lost, not snap immediately."""
+        test_config["camera"]["smoothing_mode"] = "legacy"
         gen = CameraPathGenerator(test_config)
         meta = VideoMeta(
             width=640, height=320, fps=30.0,
@@ -905,3 +906,110 @@ class TestVelocityAdaptiveBlending:
         for i in range(len(angles_off)):
             assert abs(angles_off[i][0] - angles_base[i][0]) < 0.01
             assert abs(angles_off[i][1] - angles_base[i][1]) < 0.01
+
+
+class TestCinematicCamera:
+    """Cinematic mode: continuous pan (no stair-steps), rare/slow zoom."""
+
+    FPS = 30.0
+
+    def _run(self, test_config, tmp_work_dir, tracks, clusters=None, name="cin"):
+        test_config["camera"]["smoothing_mode"] = "cinematic"
+        if clusters is not None:
+            test_config["center_of_play"]["enabled"] = True
+        gen = CameraPathGenerator(test_config)
+        n = len(tracks)
+        meta = VideoMeta(
+            width=640, height=320, fps=self.FPS,
+            duration=n / self.FPS, total_frames=n, codec="h264",
+        )
+        tp = tmp_work_dir / f"tracks_{name}.json"
+        tp.write_text(json.dumps(tracks))
+        cp = None
+        if clusters is not None:
+            cp = tmp_work_dir / f"clusters_{name}.json"
+            cp.write_text(json.dumps(clusters))
+        out = tmp_work_dir / f"camera_{name}.json"
+        gen.generate(tp, meta, out, player_cluster_path=cp)
+        return json.loads(out.read_text()), gen
+
+    @staticmethod
+    def _yaw(path):
+        return np.degrees(np.unwrap(np.radians([e["yaw"] for e in path])))
+
+    def _ball_at_yaw(self, test_config, yaw_deg):
+        w = test_config["detection"]["img_size"] * 2 if "detection" in test_config \
+            else test_config["detector"]["resolution"][0]
+        h = w / 2
+        x = ((yaw_deg + 180.0) % 360.0) / 360.0 * w
+        return {"x": x, "y": h / 2, "confidence": 0.9}
+
+    def test_steady_pan_has_no_stair_steps(self, test_config, tmp_work_dir):
+        """Ball moving at constant speed -> camera moves every frame, no jumps."""
+        n = 300
+        tracks = [
+            {"frame": i, "ball": self._ball_at_yaw(test_config, -60 + i * 0.5)}
+            for i in range(n)
+        ]
+        path, gen = self._run(test_config, tmp_work_dir, tracks, name="steady")
+        d = np.diff(self._yaw(path))
+        mid = d[90:-90]
+        assert np.all(np.abs(mid) > 1e-3), "camera stalls mid-pan (stair-step)"
+        assert np.max(np.abs(d)) * self.FPS <= gen.max_fast_pan_speed + 1e-6
+        accel = np.abs(np.diff(d)) * self.FPS * self.FPS
+        assert np.max(accel) <= gen.max_pan_accel + 1.0
+
+    def test_jitter_inside_deadzone_keeps_camera_still(
+        self, test_config, tmp_work_dir
+    ):
+        rng = np.random.default_rng(0)
+        tracks = [
+            {"frame": i, "ball": self._ball_at_yaw(
+                test_config, 20 + rng.uniform(-2, 2))}
+            for i in range(300)
+        ]
+        path, _ = self._run(test_config, tmp_work_dir, tracks, name="jitter")
+        yaw = self._yaw(path)[30:]
+        assert yaw.max() - yaw.min() < 1.0
+
+    def test_yaw_wrap_is_continuous(self, test_config, tmp_work_dir):
+        tracks = [
+            {"frame": i, "ball": self._ball_at_yaw(test_config, 160 + i * 0.3)}
+            for i in range(300)
+        ]
+        path, gen = self._run(test_config, tmp_work_dir, tracks, name="wrap")
+        d = np.diff(self._yaw(path))
+        assert np.max(np.abs(d)) * self.FPS <= gen.max_fast_pan_speed + 1e-6
+        assert all(-180.0 <= e["yaw"] < 180.0 for e in path)
+
+    def test_noisy_spread_does_not_pump_zoom(self, test_config, tmp_work_dir):
+        """Frame-to-frame spread noise must not cause zoom oscillation."""
+        n = 600
+        tracks = [
+            {"frame": i, "ball": self._ball_at_yaw(test_config, 0.0)}
+            for i in range(n)
+        ]
+        w = test_config["detector"]["resolution"][0]
+        clusters = [
+            {"frame": i, "cluster": {
+                "x": w / 2, "y": w / 4,
+                "spread_x_deg": 15.0 if i % 2 else 45.0,
+                "player_count": 8, "confidence": 0.6}}
+            for i in range(n)
+        ]
+        path, gen = self._run(
+            test_config, tmp_work_dir, tracks, clusters, name="spread")
+        fov = np.array([e["fov"] for e in path])
+        df = np.diff(fov)
+        assert np.max(np.abs(df)) * self.FPS <= gen.fov_max_rate + 0.5
+        moving = np.sign(df[np.abs(df) > 0.01])
+        assert np.sum(np.diff(moving) != 0) <= 2
+
+    def test_sustained_loss_eventually_widens(self, test_config, tmp_work_dir):
+        tracks = [
+            {"frame": i, "ball": self._ball_at_yaw(test_config, 0.0)}
+            for i in range(60)
+        ] + [{"frame": i, "ball": None} for i in range(60, 600)]
+        path, gen = self._run(test_config, tmp_work_dir, tracks, name="lost")
+        assert path[61]["fov"] < gen.max_fov - 5.0
+        assert path[-1]["fov"] > gen.max_fov - 1.0

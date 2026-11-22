@@ -90,6 +90,23 @@ camera:
   lookahead_enabled: true
   lookahead_frames: 3
   lookahead_max_deg: 10.0
+  # Smoothing mode: "cinematic" (offline zero-phase smoothing, continuous
+  # dead-zone, accel-limited pan, hysteresis zoom) or "legacy" (per-frame
+  # EMA + deadband + clamp; produces hold-then-jump stair-step panning).
+  smoothing_mode: cinematic
+  pan_presmooth_sec: 0.3            # zero-phase Gaussian sigma on raw target
+  pan_deadzone_deg: 5.0             # continuous yaw dead-zone (leash radius)
+  pitch_deadzone_deg: 3.0
+  pan_response_sec: 0.6             # follow time constant
+  max_pan_accel_deg_per_sec2: 45.0  # ease-in/out; caps pan acceleration
+  pan_final_smooth_sec: 0.25
+  fov_from_speed: false             # speed-driven zoom causes constant pumping
+  fov_presmooth_sec: 2.0            # zoom target smoothing (after ~1s median)
+  fov_hysteresis_deg: 8.0           # zoom only when target differs by > this
+  fov_min_hold_sec: 4.0             # minimum time between zoom changes
+  fov_max_rate_deg_per_sec: 4.0     # slow zoom transitions
+  fov_max_accel_deg_per_sec2: 4.0
+  fov_final_smooth_sec: 0.5
   kalman:
     process_noise: 0.1
     measurement_noise: 2.0
