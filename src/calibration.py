@@ -617,7 +617,7 @@ def _foi_yaw_range(config: dict) -> tuple[float, float]:
 
 
 def merge_hoops(llm_hoops: list[dict], player_hoops: list[dict],
-                max_dyaw: float = 15.0) -> list[dict]:
+                max_dyaw: float = 12.0) -> list[dict]:
     """Combine LLM hoops with the player-geometry estimate.
 
     The player estimate says *which* ends of the court are used (robust);

@@ -356,3 +356,9 @@ def test_refine_rejects_answer_outside_window(monkeypatch):
         "found": True, "yaw": -3.7, "rim_pitch": -7, "board_top_pitch": -6})
     frame = np.zeros((1920, 3840, 3), np.uint8)
     assert loc._refine(frame, {"yaw": -30, "pitch": -11}, "hoop", "{}", (15, 10)) is None
+
+
+def test_merge_hoops_rejects_llm_hoop_too_far_from_play_end():
+    llm = [{"yaw": -36.9, "rim_pitch": -6.9, "board_top_pitch": -5.7}]
+    players = [{"yaw": -50.65, "rim_pitch": -8.6, "board_top_pitch": -3.8}]
+    assert cal.merge_hoops(llm, players)[0]["yaw"] == -50.65
