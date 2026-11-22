@@ -92,6 +92,7 @@ def test_config() -> dict:
                 "lookahead_max_deg": 10.0,
                 "smoothing_mode": "cinematic",
                 "pan_presmooth_sec": 0.3,
+                "pan_lead_sec": 0.0,
                 "pan_deadzone_deg": 5.0,
                 "pitch_deadzone_deg": 3.0,
                 "pan_response_sec": 0.6,

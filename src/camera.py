@@ -154,6 +154,9 @@ class CameraPathGenerator:
         # (per-frame EMA + deadband + clamp).
         self.smoothing_mode = cam_cfg.get("smoothing_mode", "cinematic")
         self.pan_presmooth_sec = cam_cfg.get("pan_presmooth_sec", 0.3)
+        # Offline anticipation: follow where the play will be pan_lead_sec
+        # from now (compensates follow lag and the cluster arriving late).
+        self.pan_lead_sec = cam_cfg.get("pan_lead_sec", 0.0)
         self.pan_deadzone_deg = cam_cfg.get("pan_deadzone_deg", 5.0)
         self.pitch_deadzone_deg = cam_cfg.get("pitch_deadzone_deg", 3.0)
         self.pan_response_sec = cam_cfg.get("pan_response_sec", 0.6)
@@ -696,6 +699,9 @@ class CameraPathGenerator:
 
         def process(x: np.ndarray, deadzone: float) -> np.ndarray:
             x = _gaussian_zero_phase(x, self.pan_presmooth_sec * fps)
+            lead = int(round(self.pan_lead_sec * fps))
+            if 0 < lead < len(x):
+                x = np.concatenate([x[lead:], np.full(lead, x[-1])])
             x = _leash(x, deadzone)
             x = _limited_follow(
                 x, fps,
@@ -753,6 +759,9 @@ class CameraPathGenerator:
         if not entries:
             return []
         target = np.array([self._fov_target(e) for e in entries], dtype=float)
+        lead = int(round(self.pan_lead_sec * fps))
+        if 0 < lead < len(target):
+            target = np.concatenate([target[lead:], np.full(lead, target[-1])])
         med = max(1, int(round(fps)) | 1)  # ~1 s, odd window
         if len(target) >= med:
             target = median_filter(target, size=med, mode="nearest")

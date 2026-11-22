@@ -1013,3 +1013,18 @@ class TestCinematicCamera:
         path, gen = self._run(test_config, tmp_work_dir, tracks, name="lost")
         assert path[61]["fov"] < gen.max_fov - 5.0
         assert path[-1]["fov"] > gen.max_fov - 1.0
+
+    def test_pan_lead_starts_move_earlier(self, test_config, tmp_work_dir):
+        """With pan_lead_sec the camera starts a big switch before the target."""
+        tracks = [
+            {"frame": i, "ball": self._ball_at_yaw(
+                test_config, -40.0 if i < 150 else 40.0)}
+            for i in range(300)
+        ]
+        base, _ = self._run(test_config, tmp_work_dir, tracks, name="nolead")
+        test_config["camera"]["pan_lead_sec"] = 0.7
+        led, _ = self._run(test_config, tmp_work_dir, tracks, name="lead")
+        yb, yl = self._yaw(base), self._yaw(led)
+        assert yl[150] > yb[150] + 5.0
+        first_move = lambda y: int(np.argmax(y > y[0] + 1.0))
+        assert first_move(yl) < first_move(yb)

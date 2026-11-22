@@ -62,7 +62,7 @@ camera:
   max_pan_speed_deg_per_sec: 90.0
   max_fast_pan_speed_deg_per_sec: 180.0   # fast breaks cross the court in ~3 s
   default_fov: 100.0
-  min_fov: 80.0
+  min_fov: 62.0          # tight framing under the basket (players clustered)
   max_fov: 120.0
   field_center_pitch_deg: -15.0
   deadband_deg: 3.0
@@ -71,6 +71,9 @@ camera:
   # cinematic smoothing: faster ease-in for fast breaks (pipeline.yaml: 45 / 0.6)
   max_pan_accel_deg_per_sec2: 90.0
   pan_response_sec: 0.45
+  pan_lead_sec: 0.7       # anticipate: start moving before players reach the other half
+  fov_max_rate_deg_per_sec: 8.0   # half-court switch zooms out/in within ~3-5 s
+  fov_max_accel_deg_per_sec2: 8.0
 
 center_of_play:
   # Ball is in someone's hands most of the time -> lean on the player cluster.
@@ -85,7 +88,7 @@ center_of_play:
 
 reframer:
   output_resolution: [1920, 1080]
-  source_downscale: [3840, 1920]
+  source_downscale: [5760, 2880]   # 8K source; sharper when zoomed to ~62 deg
   num_workers: 6
   tactical_fov: 150
   tactical_pitch: -15.0
