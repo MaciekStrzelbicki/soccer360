@@ -64,6 +64,21 @@ class TestClockScore:
         assert sb["pitch"] == pytest.approx(0.0, abs=0.2)
         assert sb["width_deg"] == pytest.approx(15.0, abs=0.5)  # 10 deg * 1.5
 
+    def test_compact_peak_beats_higher_scattered_activity(self):
+        width = 3600  # 10 px per degree
+        score = np.zeros((400, 1200), np.float32)
+        rng = np.random.default_rng(0)
+        # crowd: many scattered blobs with the highest single values
+        for _ in range(60):
+            y, x = rng.integers(220, 380), rng.integers(600, 1150)
+            score[y:y + 6, x:x + 6] = 0.30
+        # scoreboard: one compact blob, slightly lower peak
+        score[100:120, 200:260] = 0.25
+        sb = cal.score_to_scoreboard(score, (0, 0, 1200, 400), width)
+        cx = (200 + 260) / 2 / width * 360 - 180
+        assert sb["yaw"] == pytest.approx(cx, abs=0.5)
+        assert sb["width_deg"] < 15
+
     def test_no_signal_returns_none(self):
         assert cal.score_to_scoreboard(np.zeros((10, 10), np.float32), (0, 0, 10, 10), 3840) is None
 

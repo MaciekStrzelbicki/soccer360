@@ -169,6 +169,15 @@ def calibrate(ctx: click.Context, video_path: str, llm: bool | None, port: int):
     from .utils import probe_video
 
     cfg = copy.deepcopy(ctx.obj["config"])
+    # Reuse detections from the latest processing of this video (hoop estimate)
+    det_path = cluster_path = None
+    scratch = Path(cfg.get("paths", {}).get("scratch", ""))
+    runs = sorted(scratch.glob(f"*_{Path(video_path).stem}")) if scratch.is_dir() else []
+    for run in reversed(runs):
+        if (run / "detections.jsonl").exists() and (run / "player_cluster.json").exists():
+            det_path, cluster_path = run / "detections.jsonl", run / "player_cluster.json"
+            click.echo(f"Using detections from {run}")
+            break
     cal_cfg = cfg.setdefault("calibration", {})
     cal_cfg["enabled"] = True
     if llm is not None:
@@ -180,7 +189,14 @@ def calibrate(ctx: click.Context, video_path: str, llm: bool | None, port: int):
     saved = json.loads(reg.read_text())
     reg.write_text(json.dumps({**saved, "scoreboard": None, "hoops": []}, indent=2))
     try:
-        cal = resolve_calibration(cfg, video_path, meta.duration)
+        from .camera import CameraPathGenerator
+
+        cam = CameraPathGenerator(cfg)
+        cal = resolve_calibration(
+            cfg, video_path, meta.duration,
+            detections_path=det_path, player_cluster_path=cluster_path,
+            det_size=(cam.det_width, cam.det_height),
+        )
     finally:
         reg.write_text(json.dumps(saved, indent=2))
 

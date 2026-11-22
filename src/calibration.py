@@ -225,13 +225,53 @@ def scoreboard_clock_score(
     return score, (x0, y0, x1, y1)
 
 
+def pick_scoreboard_peak(score, width, candidates=30):
+    """Best clock-score peak, weighted by compactness.
+
+    A scoreboard is a compact island of activity; moving jerseys or a
+    fidgeting crowd produce peaks inside widespread activity. Compactness =
+    share of above-threshold pixels near the peak (8x4 deg) vs. around it
+    (30x12 deg).
+    """
+    px = width / 360.0
+    s = score.copy()
+    best, best_val = None, 0.0
+    for _ in range(candidates):
+        yy, xx = np.unravel_index(int(np.argmax(s)), s.shape)
+        val = float(s[yy, xx])
+        if val <= 0:
+            break
+        m = score > 0.35 * val
+
+        def win(hy, hx):
+            return m[max(0, int(yy - hy * px)):int(yy + hy * px),
+                     max(0, int(xx - hx * px)):int(xx + hx * px)].sum()
+
+        compact = win(2, 4) / max(win(6, 15), 1)
+        rank = val * compact ** 2
+        if rank > best_val:
+            best, best_val = (yy, xx, val), rank
+        s[max(0, int(yy - 3 * px)):int(yy + 3 * px),
+          max(0, int(xx - 6 * px)):int(xx + 6 * px)] = 0
+    return best
+
+
 def score_to_scoreboard(score, box, width, min_score=0.08):
-    """Peak of the clock score -> scoreboard centre/size (degrees)."""
+    """Best clock-score peak -> scoreboard centre/size (degrees)."""
     if score.size == 0 or float(score.max()) < min_score:
         return None
     h = width // 2
-    yy, xx = np.unravel_index(int(np.argmax(score)), score.shape)
-    peak = float(score[yy, xx])
+    picked = pick_scoreboard_peak(score, width)
+    if picked is None:
+        return None
+    yy, xx, peak = picked
+    # only look at a window around the peak (a scoreboard is < ~20 x 8 deg)
+    px = width / 360.0
+    wy0, wx0 = max(0, int(yy - 5 * px)), max(0, int(xx - 12 * px))
+    sub = score[wy0:int(yy + 5 * px), wx0:int(xx + 12 * px)]
+    yy, xx = yy - wy0, xx - wx0
+    box = (box[0] + wx0, box[1] + wy0)
+    score = sub
     # digits blob: pixels above 35% of the peak connected to it
     mask = (score > 0.35 * peak).astype(np.uint8)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
