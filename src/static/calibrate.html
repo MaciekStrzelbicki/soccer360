@@ -57,7 +57,7 @@
   <aside class="card">
     <a href="/" class="muted">← Control Room</a>
     <h1>Venue calibration</h1>
-    <p class="muted">Scoreboard (overlay) and hoops (kept in frame when zoomed). Saved per video; overrides automatic detection. Mark them on the current frame: if the camera is bumped later, processing follows the scoreboard from this frame.</p>
+    <p class="muted">Scoreboard (overlay), hoops (kept in frame when zoomed) and the court's 4 corners (only players on the court steer the camera; the zoom keeps all of them in frame). Saved per video; overrides automatic detection. Mark them on the current frame: if the camera is bumped later, processing follows the scoreboard from this frame.</p>
 
     <h2>Videos</h2>
     <div class="videos" id="videos"><span class="muted">Loading…</span></div>
@@ -114,6 +114,9 @@
       <select id="hoopSel"></select>
       <button id="addHoop">+ hoop</button>
       <button id="delHoop">− hoop</button>
+      <button data-mode="court">Court: click 4 corners</button>
+      <label class="muted">court <input id="courtL" type="number" step="0.5" value="28" style="width:58px"> × <input id="courtW" type="number" step="0.5" value="15" style="width:52px"> m</label>
+      <button id="clearCourt">Clear court</button>
       <button id="fit">Fit</button>
     </div>
     <div class="row" style="margin-bottom:8px">
@@ -126,6 +129,7 @@
       <span><i class="dot" style="background:var(--green)"></i>scoreboard</span>
       <span><i class="dot" style="background:var(--orange)"></i>rim</span>
       <span><i class="dot" style="background:var(--magenta)"></i>backboard top (kept in frame)</span>
+      <span><i class="dot" style="background:#ffe14d"></i>court (click the 4 outer corners where sideline meets baseline; click again to move the nearest one — the drawn lines must match the floor)</span>
       <span class="muted">Wheel = zoom, drag = move (in Move mode). Coordinates: yaw −180…180°, pitch −90…90°.</span>
     </div>
     <h2>Broadcast preview (level + vertical correction)</h2>
@@ -143,7 +147,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const state = { stem: null, data: null, cal: { scoreboard: null, hoops: [] }, img: null,
+const state = { stem: null, data: null, cal: { scoreboard: null, hoops: [], court: { corners: [] } }, img: null,
   mode: "pan", hoop: 0, zoom: 1, ox: 0, oy: 0, duration: null, drag: null };
 
 function setStatus(msg, cls) { const s = $("status"); s.textContent = msg || ""; s.className = "status " + (cls || ""); }
@@ -205,7 +209,9 @@ function showMatch() {
 function useCal(c, label) {
   c = c || {};
   state.cal = { scoreboard: c.scoreboard ? { ...c.scoreboard } : null,
-                hoops: (c.hoops || []).map((h) => ({ ...h })) };
+                hoops: (c.hoops || []).map((h) => ({ ...h })),
+                court: { corners: ((c.court && c.court.corners) || []).map((p) => ({ ...p })) } };
+  if (c.court) { $("courtL").value = c.court.length_m || 28; $("courtW").value = c.court.width_m || 15; }
   const lv = c.level || null;
   $("roll").value = lv ? lv.roll_deg : 0; $("tilt").value = lv ? lv.tilt_deg : 0;
   $("levelInfo").textContent = lv ? `camera roll ${lv.roll_deg}°, tilt ${lv.tilt_deg}°` + (lv.inliers ? ` (from ${lv.inliers} vertical lines)` : "") : "no level measured";
@@ -266,11 +272,81 @@ function draw() {
     const [lx, ly] = toScreen(x, pitchToY(h.board_top_pitch ?? h.rim_pitch));
     ctx.fillStyle = "#fff"; ctx.font = "12px sans-serif"; ctx.fillText("hoop " + (i + 1), lx + 12, ly - 8);
   });
+  drawCourt();
   if (state.drag && state.drag.kind === "box") {
     const d = state.drag; ctx.strokeStyle = "#43c983"; ctx.setLineDash([5, 4]);
     ctx.strokeRect(d.sx, d.sy, d.cx - d.sx, d.cy - d.sy); ctx.setLineDash([]);
   }
   drawPreview();
+}
+
+// ---- court geometry (mirrors src/court.py) ----
+const rad = (d) => d * Math.PI / 180, deg = (r) => r * 180 / Math.PI;
+function toPlane(yaw, pitch) {  // nadir-gnomonic projection; null above the horizon
+  const down = -Math.sin(rad(pitch)); if (down <= 1e-3) return null;
+  const c = Math.cos(rad(pitch));
+  return [c * Math.sin(rad(yaw)) / down, c * Math.cos(rad(yaw)) / down];
+}
+function fromPlane(u, v) { const n = Math.hypot(u, v, 1); return [deg(Math.atan2(u, v)), deg(Math.asin(-1 / n))]; }
+function orderCorners(cs) {
+  const p = [...cs].sort((a, b) => b.pitch - a.pitch);
+  const lr = (a, b) => ((((b.yaw - a.yaw) + 180) % 360 + 360) % 360 - 180) > 0 ? [a, b] : [b, a];
+  const [fl, fr] = lr(p[0], p[1]), [nl, nr] = lr(p[2], p[3]);
+  return [fl, fr, nr, nl];
+}
+function solveH(src, dst) {  // 4-point homography, h33 = 1
+  const A = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = src[i], [X, Y] = dst[i];
+    A.push([x, y, 1, 0, 0, 0, -x * X, -y * X, X]);
+    A.push([0, 0, 0, x, y, 1, -x * Y, -y * Y, Y]);
+  }
+  for (let c = 0; c < 8; c++) {
+    let piv = c; for (let r = c + 1; r < 8; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+    if (Math.abs(A[piv][c]) < 1e-12) return null;
+    [A[c], A[piv]] = [A[piv], A[c]];
+    for (let r = 0; r < 8; r++) if (r !== c) { const f = A[r][c] / A[c][c]; for (let k = c; k < 9; k++) A[r][k] -= f * A[c][k]; }
+  }
+  const h = A.map((row, i) => row[8] / row[i]); h.push(1); return h;
+}
+function courtToAngles() {  // returns fn(X, Y) -> [yaw, pitch] or null
+  const cs = state.cal.court.corners; if (cs.length !== 4) return null;
+  const L = +$("courtL").value || 28, Wd = +$("courtW").value || 15;
+  const o = orderCorners(cs), pl = o.map((c) => toPlane(c.yaw, c.pitch));
+  if (pl.some((p) => !p)) return null;
+  const h = solveH([[0, Wd], [L, Wd], [L, 0], [0, 0]], pl); if (!h) return null;
+  return (X, Y) => { const w = h[6] * X + h[7] * Y + 1; return fromPlane((h[0] * X + h[1] * Y + h[2]) / w, (h[3] * X + h[4] * Y + h[5]) / w); };
+}
+function drawCourt() {
+  const cs = state.cal.court.corners;
+  const f = courtToAngles();
+  if (f) {
+    const L = +$("courtL").value || 28, Wd = +$("courtW").value || 15, N = 120;
+    const line = (fn) => {
+      ctx.beginPath(); let prev = null;
+      for (let i = 0; i <= N; i++) {
+        const [X, Y] = fn(i / N), [yw, pt] = f(X, Y), x = yawToX(yw), y = pitchToY(pt);
+        const [sx, sy] = toScreen(x, y);
+        if (prev === null || Math.abs(x - prev) > W() / 2) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+        prev = x;
+      }
+      ctx.stroke();
+    };
+    ctx.strokeStyle = "#ffe14d"; ctx.lineWidth = 2;
+    line((t) => [t * L, Wd]); line((t) => [L, Wd - t * Wd]); line((t) => [L - t * L, 0]); line((t) => [0, t * Wd]);
+    ctx.setLineDash([6, 4]);
+    line((t) => [L / 2, t * Wd]);
+    line((t) => [L / 2 + 1.8 * Math.cos(t * 2 * Math.PI), Wd / 2 + 1.8 * Math.sin(t * 2 * Math.PI)]);
+    for (const [x0, s] of [[0, 1], [L, -1]]) {  // keys (4.9 m wide, 5.8 m deep)
+      line((t) => [x0 + s * 5.8 * t, Wd / 2 - 2.45]); line((t) => [x0 + s * 5.8, Wd / 2 - 2.45 + 4.9 * t]); line((t) => [x0 + s * 5.8 * (1 - t), Wd / 2 + 2.45]);
+    }
+    ctx.setLineDash([]);
+  }
+  cs.forEach((c, i) => {
+    const [sx, sy] = toScreen(yawToX(c.yaw), pitchToY(c.pitch));
+    ctx.fillStyle = "#ffe14d"; ctx.beginPath(); ctx.arc(sx, sy, 6, 0, 2 * Math.PI); ctx.fill();
+    ctx.fillStyle = "#000"; ctx.font = "bold 11px sans-serif"; ctx.fillText(String(i + 1), sx - 3, sy + 4);
+  });
 }
 
 function drawPreview() {
@@ -300,6 +376,18 @@ viewer.addEventListener("pointerdown", (e) => {
   viewer.setPointerCapture(e.pointerId);
   if (state.mode === "pan") state.drag = { kind: "pan", sx, sy, ox: state.ox, oy: state.oy };
   else if (state.mode === "scoreboard") state.drag = { kind: "box", sx, sy, cx: sx, cy: sy };
+  else if (state.mode === "court") {
+    const [ix, iy] = toImage(sx, sy), pt = { yaw: r2(xToYaw(ix)), pitch: r2(yToPitch(iy)) };
+    if (pt.pitch >= -1) { setStatus("Court corners must be on the floor (below the horizon)", "err"); return; }
+    const cs = state.cal.court.corners;
+    if (cs.length < 4) cs.push(pt);
+    else {  // move the nearest corner
+      let best = 0, bd = Infinity;
+      cs.forEach((c, i) => { const [cx, cy] = toScreen(yawToX(c.yaw), pitchToY(c.pitch)); const d = Math.hypot(cx - sx, cy - sy); if (d < bd) { bd = d; best = i; } });
+      cs[best] = pt;
+    }
+    renderTable(); draw();
+  }
   else {
     const [ix, iy] = toImage(sx, sy);
     if (!state.cal.hoops.length) addHoop();
@@ -348,6 +436,8 @@ $("hoopSel").onchange = (e) => { state.hoop = +e.target.value; draw(); };
 $("addHoop").onclick = () => { addHoop(); renderTable(); draw(); };
 $("delHoop").onclick = () => { state.cal.hoops.splice(state.hoop, 1); state.hoop = 0; refreshHoopSel(); renderTable(); draw(); };
 $("fit").onclick = fit;
+$("clearCourt").onclick = () => { state.cal.court.corners = []; renderTable(); draw(); };
+["courtL", "courtW"].forEach((id) => $(id).addEventListener("input", draw));
 
 function renderTable() {
   const t = $("valTable"); const sb = state.cal.scoreboard;
@@ -357,6 +447,8 @@ function renderTable() {
   state.cal.hoops.forEach((h, i) => {
     html += `<tr><td>hoop ${i + 1}</td><td><input data-h="${i}" data-k="yaw" value="${h.yaw}"></td><td><input data-h="${i}" data-k="rim_pitch" value="${h.rim_pitch ?? ""}" title="rim"></td><td><input data-h="${i}" data-k="board_top_pitch" value="${h.board_top_pitch ?? ""}" title="backboard top"></td><td></td></tr>`;
   });
+  const nc = state.cal.court.corners.length;
+  html += `<tr><td>court</td><td colspan="4" class="muted">${nc === 4 ? "4 corners ✓ " + ($("courtL").value || 28) + " × " + ($("courtW").value || 15) + " m" : nc + "/4 corners"}</td></tr>`;
   t.innerHTML = html;
   t.querySelectorAll("input").forEach((inp) => inp.onchange = () => {
     const v = parseFloat(inp.value); if (isNaN(v)) return;
@@ -386,10 +478,13 @@ $("loadManual").onclick = () => state.data && state.data.manual ? useCal(state.d
 $("save").onclick = async () => {
   try {
     const hoops = state.cal.hoops.filter((h) => h.rim_pitch != null || h.board_top_pitch != null);
+    const cs = state.cal.court.corners;
+    if (cs.length && cs.length !== 4) { setStatus("Click all 4 court corners (or Clear court) before saving", "err"); return; }
+    const court = cs.length === 4 ? { corners: cs, length_m: +$("courtL").value || 28, width_m: +$("courtW").value || 15 } : null;
     await api("/api/calibration/" + encodeURIComponent(state.stem), { method: "POST",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scoreboard: state.cal.scoreboard, hoops,
         level: { roll_deg: parseFloat($("roll").value) || 0, tilt_deg: parseFloat($("tilt").value) || 0 },
-        frame_time_sec: +$("time").value }) });
+        court, frame_time_sec: +$("time").value }) });
     setStatus("Saved. Next processing of this video uses it.", "ok");
     state.data = await api("/api/calibration/" + encodeURIComponent(state.stem)); loadList();
   } catch (e) { setStatus("Save failed: " + e.message, "err"); }

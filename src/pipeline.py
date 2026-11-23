@@ -122,6 +122,7 @@ class Pipeline:
         self.camera.keep_in_frame = list(self._base_keep_in_frame)
         self.reframer.scoreboard_overlay = self._base_scoreboard_overlay
         self.reframer.level_zenith = self._base_level_zenith
+        self.camera.court = None
         logger.info("--- Phase 2.9: Venue Calibration ---")
         try:
             with self._tracked_phase(timer, job_id, "calibration"):
@@ -342,6 +343,7 @@ class Pipeline:
                     self.camera.generate(
                         tracks_path, meta, camera_path_file,
                         player_cluster_path=player_cluster_path,
+                        detections_path=detections_path,
                     )
             else:
                 # NO_DETECT mode: skip detection/tracking, static camera

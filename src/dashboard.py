@@ -1377,7 +1377,12 @@ def create_app(config: dict | None = None) -> FastAPI:
                          "tilt_deg": float(level.get("tilt_deg", 0.0))}
             except (TypeError, ValueError, AttributeError):
                 raise HTTPException(400, "Invalid level")
-        if not sb and not hoops and not level:
+        court = None
+        if payload.get("court"):
+            court = cal_mod.clean_court(payload["court"])
+            if court is None:
+                raise HTTPException(400, "Invalid court: need 4 corners below the horizon")
+        if not sb and not hoops and not level and not court:
             raise HTTPException(400, "Nothing to save")
         fts = payload.get("frame_time_sec")
         try:
@@ -1386,9 +1391,9 @@ def create_app(config: dict | None = None) -> FastAPI:
             raise HTTPException(400, "Invalid frame_time_sec")
         path = cal_mod.save_manual(
             config, vp, {"scoreboard": sb, "hoops": hoops, "level": level,
-                         "frame_time_sec": fts})
+                         "court": court, "frame_time_sec": fts})
         return {"ok": True, "path": str(path), "scoreboard": sb, "hoops": hoops,
-                "level": level}
+                "level": level, "court": court}
 
     def _scoring_dir(stem: str) -> Path | None:
         root = Path(config.get("paths", {}).get("processed", "/tank/processed"))
@@ -1428,6 +1433,7 @@ def create_app(config: dict | None = None) -> FastAPI:
         p = cal_mod.manual_path(config, vp)
         data = json.loads(p.read_text())
         data.update({"scoreboard": None, "hoops": []})
+        data.pop("court", None)
         p.write_text(json.dumps(data, indent=2))
         return {"ok": True}
 

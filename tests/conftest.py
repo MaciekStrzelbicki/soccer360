@@ -116,6 +116,10 @@ def test_config() -> dict:
                     "enabled": False, "switch_deg": 8.0, "min_dwell_sec": 2.0,
                     "decide_smooth_sec": 1.0, "anchor_frac": 0.5, "follow": 0.3,
                 },
+                "court_fit": {
+                    "enabled": False, "margin_m": 0.5, "edge_margin_deg": 3.0,
+                    "max_fov": 115.0, "min_pitch_deg": -60.0, "switch_m": 1.5,
+                },
                 "kalman": {
                     "process_noise": 0.1,
                     "measurement_noise": 2.0,

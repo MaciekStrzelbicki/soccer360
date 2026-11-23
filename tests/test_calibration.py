@@ -324,6 +324,17 @@ class TestDashboardCalibration:
         sc = r.json()["scoring"]
         assert sc["events"] == 1 and "1:04 0:2 Orły +2" in sc["youtube"]
 
+    def test_save_and_clear_court(self, client):
+        from tests.test_court import corners
+
+        bad = client.post("/api/calibration/game", json={"court": {"corners": corners()[:3]}})
+        assert bad.status_code == 400
+        r = client.post("/api/calibration/game", json={"court": {"corners": corners()}})
+        assert r.status_code == 200 and r.json()["court"]["length_m"] == 28.0
+        assert len(client.get("/api/calibration/game").json()["manual"]["court"]["corners"]) == 4
+        client.delete("/api/calibration/game/manual")
+        assert client.get("/api/calibration/game").json()["manual"] is None
+
     def test_unknown_video_404(self, client):
         assert client.get("/api/calibration/nope").status_code == 404
         assert client.get("/api/calibration/nope/frame").status_code == 404

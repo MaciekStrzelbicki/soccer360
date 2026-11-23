@@ -90,6 +90,11 @@ camera:
     min_dwell_sec: 2.0
     anchor_frac: 0.5
     follow: 0.3
+  # Court corners clicked on /calibrate: only players on the court steer the
+  # camera (bench/table ignored) and the zoom widens to keep all of them in.
+  court_fit:
+    enabled: true
+    max_fov: 115.0
   # Hold still, then move decisively: no small corrective drifts.
   pan_hold_trigger_deg: 12.0
   pitch_hold_trigger_deg: 10.0

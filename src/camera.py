@@ -254,6 +254,21 @@ class CameraPathGenerator:
         self.half_court_anchor_frac = float(hc.get("anchor_frac", 0.5))
         self.half_court_follow = float(hc.get("follow", 0.3))
 
+        # Court calibration (4 clicked corners -> floor metres): only players
+        # on the court drive the camera, and the zoom widens so all of them
+        # stay in frame. self.court is set by apply_calibration.
+        cf = cam_cfg.get("court_fit", {}) or {}
+        self.court_fit_enabled = bool(cf.get("enabled", False))
+        self.court_margin_m = float(cf.get("margin_m", 0.5))
+        self.court_edge_margin_deg = float(cf.get("edge_margin_deg", 3.0))
+        self.court_fit_max_fov = float(cf.get("max_fov", 115.0))
+        self.court_fit_min_pitch = float(cf.get("min_pitch_deg", -60.0))
+        self.court_switch_m = float(cf.get("switch_m", 1.5))
+        self.court = None
+        self._config = config
+        self._court_mean_x: np.ndarray | None = None
+        self._court_pts: tuple[np.ndarray, ...] | None = None
+
         kalman_cfg = cam_cfg.get("kalman", {})
         self.process_noise = kalman_cfg.get("process_noise", 0.1)
         self.measurement_noise = kalman_cfg.get("measurement_noise", 1.0)
@@ -314,12 +329,14 @@ class CameraPathGenerator:
         meta: VideoMeta,
         output_path: Path,
         player_cluster_path: Path | None = None,
+        detections_path: Path | None = None,
     ):
         """Generate camera path from tracked ball positions.
 
         When player_cluster_path is provided and center_of_play is enabled,
         blends ball tracking with player cluster centroid for more robust
-        camera following.
+        camera following. With a court calibration (+ court_fit enabled) and
+        detections_path, the cluster is rebuilt from on-court players only.
         """
         tracks = load_json(tracks_path)
         fps = meta.fps
@@ -334,6 +351,17 @@ class CameraPathGenerator:
                 logger.info(
                     "Center of play enabled: loaded %d cluster entries", len(clusters)
                 )
+        self._court_mean_x = None
+        self._court_pts = None
+        if (
+            self.court_fit_enabled and self.court is not None
+            and detections_path is not None and Path(detections_path).exists()
+        ):
+            court_clusters = self._court_players(
+                Path(detections_path), len(tracks), fps
+            )
+            if self.cop_enabled:
+                clusters = court_clusters
 
         logger.info(
             "Generating camera path: %d frames @ %.1f fps (hybrid=%s)",
@@ -430,6 +458,80 @@ class CameraPathGenerator:
             dropped, sum(1 for k in keys if k is not None), len(static),
         )
         return out
+
+    def _court_players(
+        self, detections_path: Path, n_frames: int, fps: float
+    ) -> list[dict]:
+        """On-court players: cluster per frame, mean court X, fit points.
+
+        Feet (bbox bottom centre) are mapped to the floor with the court
+        model (after undoing camera bumps); people outside the court + margin
+        (bench, table, spectators) are ignored. Sets ``_court_mean_x`` and
+        ``_court_pts`` and returns player_cluster-style entries.
+        """
+        import json
+
+        from .player_cluster import PlayerClusterComputer
+
+        pcc = PlayerClusterComputer(self._config)
+        rows = []
+        with open(detections_path) as fh:
+            for line in fh:
+                d = json.loads(line)
+                if d.get("class_id", d.get("class", -1)) != pcc.player_class:
+                    continue
+                conf = d.get("conf", d.get("confidence", 0.0))
+                if conf < pcc.min_player_conf:
+                    continue
+                fi = d.get("frame_index", d.get("frame", -1))
+                if not 0 <= fi < n_frames:
+                    continue
+                b = d.get("bbox_xyxy", d.get("bbox"))
+                rows.append((fi, b[0], b[1], b[2], b[3], conf))
+        mean_x = np.full(n_frames, np.nan)
+        empty = [{"frame": i, "cluster": None} for i in range(n_frames)]
+        if not rows:
+            self._court_mean_x = mean_x
+            return empty
+        a = np.array(rows, dtype=float)
+        a = a[np.argsort(a[:, 0], kind="stable")]
+        fr = a[:, 0].astype(int)
+        cx = (a[:, 1] + a[:, 3]) / 2.0
+        yaw = cx / self.det_width * 360.0 - 180.0
+        pitch_feet = 90.0 - a[:, 4] / self.det_height * 180.0
+        pitch_head = 90.0 - a[:, 2] / self.det_height * 180.0
+        sy = np.zeros(n_frames)
+        sp = np.zeros(n_frames)
+        for sg in self.scene_shifts or []:
+            i0 = int(round(float(sg["from_sec"]) * fps))
+            sy[i0:] = float(sg["dyaw"])
+            sp[i0:] = float(sg["dpitch"])
+        X, Y = self.court.to_court(yaw - sy[fr], pitch_feet - sp[fr])
+        ok = self.court.inside(X, Y, self.court_margin_m)
+        logger.info(
+            "Court filter: %d/%d player detections on court (+%.1f m)",
+            int(ok.sum()), len(ok), self.court_margin_m,
+        )
+        fr, a, X = fr[ok], a[ok], X[ok]
+        self._court_pts = (fr, yaw[ok], pitch_feet[ok], pitch_head[ok])
+
+        raw: list[dict | None] = [None] * n_frames
+        bounds = np.flatnonzero(np.diff(fr)) + 1
+        starts = np.concatenate([[0], bounds])
+        ends = np.concatenate([bounds, [len(fr)]])
+        for s0, e0 in zip(starts, ends):
+            if e0 - s0 < pcc.min_players:
+                continue
+            i = int(fr[s0])
+            dets = [
+                {"bbox_xyxy": a[k, 1:5].tolist(), "conf": float(a[k, 5])}
+                for k in range(s0, e0)
+            ]
+            raw[i] = pcc._compute_cluster(dets)
+            mean_x[i] = float(np.mean(X[s0:e0]))
+        self._court_mean_x = mean_x
+        smoothed = pcc._ema_smooth(raw)
+        return [{"frame": i, "cluster": smoothed[i]} for i in range(n_frames)]
 
     def _tracks_to_angles(
         self, tracks: list[dict]
@@ -863,31 +965,58 @@ class CameraPathGenerator:
     def _half_court_yaw(self, yaw: np.ndarray, fps: float) -> np.ndarray:
         """Map the play yaw onto a half-court framing (basketball).
 
-        The hoops split the court at mid-court. A hysteresis state machine on
-        a heavily smoothed play yaw decides which half is active (switch only
-        once the play is ``switch_deg`` past mid-court and the previous half
-        was held for ``min_dwell_sec``). The target is an anchor between
-        mid-court and that half's hoop (``anchor_frac``) plus only ``follow``
-        of the play's deviation from it -- so wandering inside one half
-        barely moves the camera and a change of possession is one clean pan.
+        A hysteresis state machine decides which half is active: with a court
+        calibration on the on-court players' mean court X (switch once it is
+        ``court_fit.switch_m`` past mid-court), otherwise on the smoothed
+        play yaw relative to mid-court between the two hoops (``switch_deg``).
+        The previous half must have been held for ``min_dwell_sec``. The
+        target is the half's anchor (between mid-court and the hoop,
+        ``anchor_frac``) plus only ``follow`` of the play's deviation from it,
+        so wandering inside one half barely moves the camera and a change of
+        possession is one clean pan.
         """
         n = len(yaw)
-        if n == 0 or len(self.keep_in_frame) < 2:
-            if n:
-                logger.warning("half_court framing needs two hoops; skipped")
+        if n == 0:
             return yaw
         shift = np.zeros(n)
         for sg in self.scene_shifts or []:
             shift[int(round(float(sg["from_sec"]) * fps)):] = float(sg["dyaw"])
-        h0 = float(self.keep_in_frame[0]["yaw"])
-        h1 = float(self.keep_in_frame[1]["yaw"])
-        span = angle_diff(h1, h0)  # signed, h0 -> h1
-        mid = h0 + span / 2.0 + shift
-        half = abs(span) / 2.0
-        rel = ((yaw - mid + 180.0) % 360.0) - 180.0
+        use_court = (
+            self.court is not None and self._court_mean_x is not None
+            and len(self._court_mean_x) == n
+            and np.isfinite(self._court_mean_x).any()
+        )
+        if use_court:
+            mx = self._court_mean_x.copy()
+            idx = np.where(np.isfinite(mx), np.arange(n), 0)
+            np.maximum.accumulate(idx, out=idx)
+            first = int(np.argmax(np.isfinite(mx)))
+            mx = np.where(np.arange(n) < first, mx[first], mx[idx])
+            signal = mx - self.court.length / 2.0
+            sw = self.court_switch_m
+            L, W = self.court.length, self.court.width
+            f = self.half_court_anchor_frac
+            ay, _ = self.court.to_angles(
+                [L / 2.0 - f * L / 2.0, L / 2.0 + f * L / 2.0], [W / 2.0, W / 2.0]
+            )
+            anchor_l, anchor_r = float(ay[0]), float(ay[1])
+            mid_label = float(self.court.to_angles([L / 2.0], [W / 2.0])[0][0])
+        else:
+            if len(self.keep_in_frame) < 2:
+                logger.warning("half_court framing needs two hoops or a court; skipped")
+                return yaw
+            h0 = float(self.keep_in_frame[0]["yaw"])
+            h1 = float(self.keep_in_frame[1]["yaw"])
+            span = angle_diff(h1, h0)  # signed, h0 -> h1
+            mid0 = h0 + span / 2.0
+            half = abs(span) / 2.0
+            signal = ((yaw - (mid0 + shift) + 180.0) % 360.0) - 180.0
+            sw = self.half_court_switch_deg
+            anchor_l = mid0 - half * self.half_court_anchor_frac
+            anchor_r = mid0 + half * self.half_court_anchor_frac
+            mid_label = mid0
 
-        s = _gaussian_zero_phase(rel, self.half_court_decide_smooth_sec * fps)
-        sw = self.half_court_switch_deg
+        s = _gaussian_zero_phase(signal, self.half_court_decide_smooth_sec * fps)
         dwell = self.half_court_min_dwell_sec * fps
         state = 1.0 if s[0] >= 0 else -1.0
         last = -math.inf
@@ -897,14 +1026,84 @@ class CameraPathGenerator:
                 state = -state
                 last = i
             side[i] = state
-        anchor = side * half * self.half_court_anchor_frac
-        desired = anchor + self.half_court_follow * (rel - anchor)
+        anchor = np.where(side > 0, anchor_r, anchor_l) + shift
+        dev = ((yaw - anchor + 180.0) % 360.0) - 180.0
         switches = int(np.count_nonzero(np.diff(side)))
         logger.info(
-            "Half-court framing: mid-court yaw %.1f, %d half switches (%.1f/min)",
-            float(np.median(mid)), switches, switches / max(n / fps / 60.0, 1e-9),
+            "Half-court framing (%s): mid-court yaw %.1f, anchors %.1f/%.1f, "
+            "%d half switches (%.1f/min)",
+            "court" if use_court else "hoops", mid_label, anchor_l, anchor_r,
+            switches, switches / max(n / fps / 60.0, 1e-9),
         )
-        return yaw + (desired - rel)
+        return yaw - dev + self.half_court_follow * dev
+
+    def _court_fit_floor(self, entries: list[dict], fps: float) -> np.ndarray:
+        """Minimum FOV that keeps every on-court player (feet + head) in frame.
+
+        Rectilinear test against the planned yaw/pitch per frame; points
+        below ``min_pitch_deg`` (right under the camera) are ignored, the
+        result is capped at ``court_fit.max_fov``. Single-frame spikes are
+        removed (0.5 s median); the floor is then held in steps (widen early
+        and at once, narrow rarely) so the zoom does not breathe.
+        """
+        n = len(entries)
+        if self._court_pts is None or n == 0:
+            return np.full(n, -np.inf)
+        fr, pyaw, pfeet, phead = self._court_pts
+        fr = np.concatenate([fr, fr])
+        pyaw = np.concatenate([pyaw, pyaw])
+        ppit = np.concatenate([pfeet, phead])
+        keep = (fr < n) & (ppit >= self.court_fit_min_pitch)
+        fr, pyaw, ppit = fr[keep], pyaw[keep], ppit[keep]
+        req = np.zeros(n)
+        if len(fr):
+            cy = np.radians([entries[i]["yaw"] for i in range(n)])[fr]
+            cp = np.radians([entries[i]["pitch"] for i in range(n)])[fr]
+            py, pp = np.radians(pyaw), np.radians(ppit)
+            d = np.stack([np.cos(pp) * np.sin(py), np.cos(pp) * np.cos(py), np.sin(pp)])
+            fwd = np.stack([np.cos(cp) * np.sin(cy), np.cos(cp) * np.cos(cy), np.sin(cp)])
+            right = np.stack([np.cos(cy), -np.sin(cy), np.zeros_like(cy)])
+            up = np.cross(right.T, fwd.T).T
+            z = np.sum(d * fwd, axis=0)
+            x = np.sum(d * right, axis=0)
+            yv = np.sum(d * up, axis=0)
+            cap = self.court_fit_max_fov
+            m = math.radians(self.court_edge_margin_deg)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ah = np.arctan(np.abs(x) / z) + m
+                av = np.arctan(np.abs(yv) / z) + m
+                need_h = np.degrees(2.0 * ah)
+                need_v = np.degrees(
+                    2.0 * np.arctan(np.tan(np.minimum(av, 1.5)) / self.output_aspect)
+                )
+            need = np.where(z > 0.05, np.maximum(need_h, need_v), cap)
+            np.maximum.at(req, fr, np.minimum(need, cap))
+        med = max(1, int(round(0.5 * fps)) | 1)
+        if n >= med:
+            req = median_filter(req, size=med, mode="nearest")
+
+        def ahead(x: np.ndarray, sec: float) -> np.ndarray:
+            k = max(1, int(round(sec * fps)))
+            return maximum_filter1d(x, size=k, origin=-(k // 2), mode="nearest")
+
+        # Stepped floor: widen at once to what the next hold window needs
+        # (starting 1.5 s early); narrow only in one step, after the hold
+        # time, and only if the whole next hold window is hysteresis-narrower.
+        req = ahead(req, 1.5)
+        hold = max(1, int(round(self.fov_min_hold_sec * fps)))
+        fut = ahead(req, self.fov_min_hold_sec)
+        out = np.empty(n)
+        cur = float(fut[0])
+        last = 0
+        for i in range(n):
+            if req[i] > cur:
+                cur = float(fut[i])
+                last = i
+            elif cur - fut[i] > self.fov_hysteresis_deg and i - last >= hold:
+                cur = float(fut[i])
+                last = i
+            out[i] = cur
+        return np.minimum(out, self.court_fit_max_fov)
 
     def _fov_target(self, entry: dict) -> float:
         """Per-frame zoom target (before temporal smoothing)."""
@@ -988,6 +1187,8 @@ class CameraPathGenerator:
                 held = float(np.median(target[i : i + window]))
                 last_change = i
             level[i] = held
+        if self._court_pts is not None:
+            level = np.maximum(level, self._court_fit_floor(entries, fps))
 
         fov = _limited_follow(
             level, fps,
@@ -997,6 +1198,8 @@ class CameraPathGenerator:
         )
         fov = _gaussian_zero_phase(fov, self.fov_final_smooth_sec * fps)
         hi = max(self.max_fov, self.cop_spread_max_fov)
+        if self._court_pts is not None:
+            hi = max(hi, self.court_fit_max_fov)
         fov = np.clip(fov, self.min_fov, hi)
 
         return [

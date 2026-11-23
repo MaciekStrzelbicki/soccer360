@@ -129,6 +129,13 @@ camera:
     decide_smooth_sec: 1.0          # smoothing of the play yaw used for the half decision
     anchor_frac: 0.5                # framing anchor: 0 = mid-court, 1 = hoop
     follow: 0.3                     # fraction of in-half wander the camera follows
+  court_fit:                        # needs court corners from the calibration page
+    enabled: false
+    margin_m: 0.5                   # players this far outside the lines still count
+    edge_margin_deg: 3.0            # keep players this far inside the frame edge
+    max_fov: 115.0                  # widest zoom used to keep players in frame
+    min_pitch_deg: -60.0            # ignore points right under the camera (unfittable)
+    switch_m: 1.5                   # half_court: switch once play is this far past mid-court
   kalman:
     process_noise: 0.1
     measurement_noise: 2.0

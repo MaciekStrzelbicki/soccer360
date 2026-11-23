@@ -21,6 +21,8 @@ Calibration dict format (angles in degrees, equirect convention):
       "source": "manual|llm|auto|config",
       "scoreboard": {"yaw", "pitch", "width_deg", "height_deg"} | None,
       "hoops": [{"yaw", "rim_pitch", "board_top_pitch"}, ...],
+      "court": {"corners": [{"yaw", "pitch"} x4], "length_m", "width_m"},
+                                    # manual only: clicked court corners
       "video_path": "...",          # manual files only
     }
 """
@@ -84,7 +86,7 @@ def load_manual(config: dict, video_path: str | Path) -> dict | None:
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Ignoring unreadable calibration %s: %s", p, exc)
         return None
-    if not data.get("scoreboard") and not data.get("hoops") and not data.get("level"):
+    if not any(data.get(k) for k in ("scoreboard", "hoops", "level", "court")):
         return None  # registered for the UI but not calibrated yet
     data["source"] = "manual"
     return data
@@ -99,6 +101,9 @@ def save_manual(config: dict, video_path: str | Path, data: dict) -> Path:
         "scoreboard": data.get("scoreboard"),
         "hoops": data.get("hoops") or [],
     }
+    court = clean_court(data.get("court"))
+    if court:
+        out["court"] = court
     if data.get("frame_time_sec") is not None:
         out["frame_time_sec"] = float(data["frame_time_sec"])
     if data.get("level"):
@@ -776,6 +781,30 @@ def clean_hoop(hp: dict | None) -> dict | None:
         return None
 
 
+def clean_court(court: dict | None) -> dict | None:
+    """Validate clicked court corners (4 points below the horizon)."""
+    if not court:
+        return None
+    try:
+        corners = [
+            {"yaw": round(float(c["yaw"]), 2), "pitch": round(float(c["pitch"]), 2)}
+            for c in court.get("corners") or []
+        ]
+        length = float(court.get("length_m") or 28.0)
+        width = float(court.get("width_m") or 15.0)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+    if len(corners) != 4 or not (5.0 <= length <= 60.0 and 5.0 <= width <= 40.0):
+        return None
+    from .court import CourtModel
+
+    try:
+        CourtModel(corners, length, width)
+    except ValueError:
+        return None
+    return {"corners": corners, "length_m": length, "width_m": width}
+
+
 # ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
@@ -988,6 +1017,9 @@ def apply_calibration(cal: dict, camera, reframer, config: dict) -> None:
             float(lvl.get("roll_deg", 0.0)), float(lvl.get("tilt_deg", 0.0))
         )
     camera.scene_shifts = cal.get("camera_shifts") or []
+    from .court import CourtModel
+
+    camera.court = CourtModel.from_calibration(cal)
     sb = cal.get("scoreboard")
     if sb and reframer.scoreboard_overlay is not None:
         ov = dict(reframer.scoreboard_overlay)

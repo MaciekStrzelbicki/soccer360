@@ -93,6 +93,11 @@ Basketball (`configs/basketball.yaml`): `camera.static_ball_filter` drops "ball"
 (COCO sports-ball mostly fires on a spare ball; ~98% of ball frames on real footage), and `camera.half_court`
 maps the play yaw onto the active half (hysteresis on mid-court between the two calibrated hoops, anchor at
 `anchor_frac`, only `follow` of in-half wander) so the camera pans once per possession change.
+Court calibration (`src/court.py`): 4 court corners clicked on `/calibrate` (stored as `court` in the manual
+calibration, follows `camera_shifts`) give a floor homography (nadir-gnomonic plane -> metres). With
+`camera.court_fit.enabled`, `CameraPathGenerator.generate(..., detections_path=)` keeps only on-court players
+(bench/table ignored), decides the half by their mean court X, anchors each half at its centre, and raises the
+zoom floor so every on-court player stays in frame (capped at `court_fit.max_fov`; points under the camera ignored).
 
 ## Monitoring Dashboard
 
