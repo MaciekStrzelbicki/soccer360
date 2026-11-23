@@ -334,6 +334,17 @@ calibration:
     api_key_env: OPENAI_API_KEY
     timeout_sec: 120
 
+scoring:                            # scores from the scoreboard (needs calibration + LLM key)
+  enabled: false
+  led: red                          # red LED digits | bright (any colour)
+  change_threshold: 20              # pixel step counted as a board change
+  tiles_per_request: 20             # board states per vision-LLM request
+  crop_margin: 0.15
+  tile_scale: 3.0
+  lead_sec: 6.0                     # timestamps = board update minus this
+  max_points: 3                     # bigger jumps are flagged "check"
+  chapters: true                    # period chapters in youtube.txt
+
 dashboard:
   enabled: true
   db_path: /tank/data/dashboard.db

@@ -280,7 +280,8 @@ class TestDashboardCalibration:
         ingest.mkdir()
         (ingest / "game.mp4").write_bytes(Path(synthetic_video).read_bytes())
         config = {
-            "paths": {"ingest": str(ingest), "stagging": str(tmp_path / "stg")},
+            "paths": {"ingest": str(ingest), "stagging": str(tmp_path / "stg"),
+                      "processed": str(tmp_path / "processed")},
             "dashboard": {"db_path": str(tmp_path / "d.db")},
             "calibration": {"enabled": True, "dir": str(tmp_path / "cal"),
                             "llm": {"enabled": False}},
@@ -303,6 +304,25 @@ class TestDashboardCalibration:
         assert client.get("/api/calibration").json()["videos"][0]["has_manual"]
         assert client.delete("/api/calibration/game/manual").status_code == 200
         assert client.get("/api/calibration/game").json()["manual"] is None
+
+    def test_match_save_and_regenerate(self, client, tmp_path):
+        r = client.post("/api/calibration/game/match",
+                        json={"home": "Tygrysy", "guest": "Lwy"})
+        assert r.status_code == 200 and r.json()["scoring"] is None
+        d = client.get("/api/calibration/game").json()
+        assert d["match"]["home"] == "Tygrysy" and d["scoring"] is None
+        # processed game with scoring -> names change regenerates youtube.txt
+        out = tmp_path / "processed" / "game"
+        out.mkdir(parents=True)
+        (out / "scoring.json").write_text(json.dumps({
+            "match": {"home": "x", "guest": "y"}, "start": {"home": 0, "guest": 0},
+            "events": [{"board_t": 70.0, "team": "guest", "points": 2,
+                        "home": 0, "guest": 2, "period": 1}],
+            "periods": [], "final": {"home": 0, "guest": 2}}))
+        r = client.post("/api/calibration/game/match",
+                        json={"home": "Tygrysy", "guest": "Orły"})
+        sc = r.json()["scoring"]
+        assert sc["events"] == 1 and "1:04 0:2 Orły +2" in sc["youtube"]
 
     def test_unknown_video_404(self, client):
         assert client.get("/api/calibration/nope").status_code == 404

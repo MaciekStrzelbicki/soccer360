@@ -169,6 +169,21 @@ calibration:
   llm:
     enabled: true                   # needs OPENAI_API_KEY; falls back to local auto without it
 
+# Scores from the scoreboard -> scoring.json / scoring.csv / youtube.txt.
+# Team names: dashboard calibration page ("Match"), or `score --home/--guest`.
+# Finds board changes locally (keyframe crops of the calibrated scoreboard),
+# then reads each constant board state with the vision LLM (calibration.llm
+# model/key); ~10 requests for a full game.
+scoring:
+  enabled: true
+  led: red                # red LED digits; "bright" for other colours
+  change_threshold: 20    # pixel step that counts as a board change (lower = more candidates)
+  tiles_per_request: 20   # board states per LLM request
+  tile_scale: 3.0         # upscale of each crop sent to the LLM
+  lead_sec: 6.0           # timestamps = board update minus this (shows the play)
+  max_points: 3           # bigger jumps are flagged "check"
+  chapters: true          # period chapters at the top of youtube.txt
+
 dashboard:
   db_path: ./data/state/dashboard.db
 

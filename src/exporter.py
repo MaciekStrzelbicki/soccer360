@@ -113,6 +113,9 @@ class Exporter:
             ]
         else:
             artifacts = ["camera_path.json"]
+        # Venue calibration + scoring (present only when enabled)
+        artifacts += ["calibration.json", "scoring.json", "scoring.csv",
+                      "youtube.txt", "scoreboard_reads.json"]
         for name in artifacts:
             src = work_dir / name
             if src.exists():

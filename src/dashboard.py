@@ -1312,6 +1312,8 @@ def create_app(config: dict | None = None) -> FastAPI:
             duration = None
         return {"stem": stem, "video_path": str(vp), "duration": duration,
                 "manual": manual, "auto": auto,
+                "match": cal_mod.load_match(config, vp),
+                "scoring": _scoring_summary(stem),
                 "config": cal_mod.from_static_config(config),
                 "vertical_correction": float(
                     config.get("reframer", {}).get("vertical_correction", 0.0) or 0.0)}
@@ -1387,6 +1389,37 @@ def create_app(config: dict | None = None) -> FastAPI:
                          "frame_time_sec": fts})
         return {"ok": True, "path": str(path), "scoreboard": sb, "hoops": hoops,
                 "level": level}
+
+    def _scoring_dir(stem: str) -> Path | None:
+        root = Path(config.get("paths", {}).get("processed", "/tank/processed"))
+        d = root / stem
+        return d if (d / "scoring.json").is_file() else None
+
+    def _scoring_summary(stem: str) -> dict | None:
+        d = _scoring_dir(stem)
+        if d is None:
+            return None
+        try:
+            doc = json.loads((d / "scoring.json").read_text())
+            yt = (d / "youtube.txt").read_text() if (d / "youtube.txt").exists() else ""
+        except (OSError, json.JSONDecodeError):
+            return None
+        return {"dir": str(d), "events": len(doc.get("events") or []),
+                "final": doc.get("final") or {}, "youtube": yt}
+
+    @app.post("/api/calibration/{stem}/match")
+    def calibration_match_save(stem: str, payload: dict):
+        vp = _cal_video(stem)
+        cal_mod.save_match(config, vp, payload or {})
+        match = cal_mod.load_match(config, vp)
+        d = _scoring_dir(stem)
+        if d is not None:  # already processed: rewrite csv / youtube text
+            from .scoring import regenerate_outputs
+            try:
+                regenerate_outputs(config, d, {"match": match})
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(500, f"Teams saved, regenerating failed: {exc}")
+        return {"ok": True, "match": match, "scoring": _scoring_summary(stem)}
 
     @app.delete("/api/calibration/{stem}/manual")
     def calibration_clear(stem: str):

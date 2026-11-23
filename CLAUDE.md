@@ -25,6 +25,7 @@ Runtime modes in `src/pipeline.py`:
 - `src/exporter.py`: metadata + ingest archival (`move`/`copy`/`leave`, collision policy)
 - `src/events.py`: EventStore (SQLite) + EventBus (null-safe pipeline wrapper) + decision queue + stale job cleanup on startup
 - `src/dashboard.py`: FastAPI monitoring dashboard + REST API + SSE stream + training management
+- `src/scoring.py`: scores from the calibrated scoreboard (keyframe crops -> local change detection -> vision-LLM reads of board states) -> `scoring.json`/`scoring.csv`/`youtube.txt`; team names in calibration file `match`; CLI `score`
 - `src/camera.py`: camera path generation — hybrid ball+cluster → Kalman → EMA → deadband → FOV EMA smoothing
 - `src/metrics.py`: PhaseTimer (context-manager timing) + gpu_utilization_snapshot (nvidia-smi) + cpu_ram_snapshot (/proc)
 - `src/static/index.html`: single-page dashboard UI (vanilla JS/CSS, EventSource SSE)

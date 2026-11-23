@@ -106,7 +106,42 @@ def save_manual(config: dict, video_path: str | Path, data: dict) -> Path:
             "roll_deg": float(data["level"].get("roll_deg", 0.0)),
             "tilt_deg": float(data["level"].get("tilt_deg", 0.0)),
         }
+    try:  # keep fields edited elsewhere (team names)
+        prev = json.loads(p.read_text()) if p.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        prev = {}
+    if prev.get("match"):
+        out["match"] = prev["match"]
     p.write_text(json.dumps(out, indent=2))
+    return p
+
+
+def clean_match(m: dict | None) -> dict:
+    """Team names (+ which scoreboard side is home) for scoring."""
+    m = m if isinstance(m, dict) else {}
+    out = {
+        "home": str(m.get("home") or "").strip()[:80],
+        "guest": str(m.get("guest") or "").strip()[:80],
+        "home_side": "right" if m.get("home_side") == "right" else "left",
+    }
+    return out
+
+
+def load_match(config: dict, video_path: str | Path) -> dict | None:
+    p = manual_path(config, video_path)
+    try:
+        m = json.loads(p.read_text()).get("match") if p.exists() else None
+    except (OSError, json.JSONDecodeError):
+        return None
+    return clean_match(m) if m else None
+
+
+def save_match(config: dict, video_path: str | Path, match: dict) -> Path:
+    """Store team names in the per-video calibration file (creates it)."""
+    p = register_video(config, video_path)
+    data = json.loads(p.read_text())
+    data["match"] = clean_match(match)
+    p.write_text(json.dumps(data, indent=2))
     return p
 
 

@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .active_learning import ActiveLearningExporter
-from .calibration import apply_calibration, resolve_calibration
+from .calibration import apply_calibration, load_match, resolve_calibration
 from .camera import CameraPathGenerator
 from .detector import Detector, resolve_model_path, resolve_model_path_v1
 from .exporter import Exporter
@@ -23,6 +23,7 @@ from .highlights import HighlightDetector
 from .metrics import PhaseTimer, gpu_utilization_snapshot
 from .player_cluster import PlayerClusterComputer
 from .reframer import Reframer
+from .scoring import run_scoring
 
 from contextlib import contextmanager
 from .tracker import BallStabilizer, Tracker
@@ -115,6 +116,7 @@ class Pipeline:
         """Resolve scoreboard/hoop positions and push them into camera/reframer."""
         import json as _json
 
+        self._last_calibration = None
         if not self.config.get("calibration", {}).get("enabled", False):
             return
         self.camera.keep_in_frame = list(self._base_keep_in_frame)
@@ -130,9 +132,28 @@ class Pipeline:
                     det_size=(self.camera.det_width, self.camera.det_height),
                 )
                 apply_calibration(cal, self.camera, self.reframer, self.config)
+                match = load_match(self.config, input_path)
+                if match:
+                    cal["match"] = match
+                self._last_calibration = cal
                 (work_dir / "calibration.json").write_text(_json.dumps(cal, indent=2))
         except Exception:
             logger.exception("Calibration failed; using config values")
+
+    def _score(self, timer, job_id, input_path, meta, work_dir):
+        """Read the scoreboard -> scoring.json / scoring.csv / youtube.txt."""
+        if not self.config.get("scoring", {}).get("enabled", False):
+            return
+        cal = getattr(self, "_last_calibration", None)
+        if not cal or not cal.get("scoreboard"):
+            logger.warning("Scoring enabled but no calibrated scoreboard; skipped")
+            return
+        logger.info("--- Phase 6.5: Scoring (scoreboard) ---")
+        try:
+            with self._tracked_phase(timer, job_id, "scoring"):
+                run_scoring(self.config, input_path, cal, meta.width, meta.height, work_dir)
+        except Exception:
+            logger.exception("Scoring failed; continuing without scores")
 
     def run(
         self,
@@ -356,6 +377,9 @@ class Pipeline:
                     )
             else:
                 logger.info("--- Phase 6: Highlights disabled (highlights.enabled: false) ---")
+
+            # Phase 6.5: Scores from the scoreboard (optional)
+            self._score(timer, job_id, input_path, meta, work_dir)
 
             # Phase 7: Export to final destination
             logger.info("--- Phase 7: Export ---")

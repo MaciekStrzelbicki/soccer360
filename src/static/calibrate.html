@@ -83,6 +83,19 @@
     <h2>Scoreboard cut</h2>
     <canvas id="sbPreview" height="120"></canvas>
 
+    <h2>Match (scoring)</h2>
+    <div class="row">
+      <input id="teamHome" placeholder="Home team (Gospodarze)" style="flex:1;min-width:120px;background:#0d1722;border:1px solid var(--border);border-radius:10px;padding:6px 8px">
+      <input id="teamGuest" placeholder="Guest team (Goście)" style="flex:1;min-width:120px;background:#0d1722;border:1px solid var(--border);border-radius:10px;padding:6px 8px">
+    </div>
+    <div class="row" style="margin-top:6px">
+      <select id="homeSide"><option value="left">home = left score</option><option value="right">home = right score</option></select>
+      <button id="saveTeams">Save teams</button>
+    </div>
+    <p class="muted" id="scoringInfo" style="margin-top:4px">Scores are read from the scoreboard during processing (scoring.enabled).</p>
+    <textarea id="ytText" readonly style="display:none;width:100%;height:180px;margin-top:6px;background:#0d1722;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px;font:12px ui-monospace,monospace"></textarea>
+    <button id="copyYt" style="display:none;margin-top:4px">Copy YouTube text</button>
+
     <h2>Actions</h2>
     <div class="row">
       <button id="runAuto">Run auto (GPT + clock)</button>
@@ -172,8 +185,21 @@ async function openVideo(stem) {
   $("pvK").value = Math.round((state.data.vertical_correction || 0) * 100);
   $("time").max = Math.max(1, Math.floor(state.duration));
   $("time").value = Math.floor(state.duration / 2);
+  showMatch();
   await loadFrame();
   refreshPreview();
+}
+
+function showMatch() {
+  const m = state.data.match || {};
+  $("teamHome").value = m.home || ""; $("teamGuest").value = m.guest || "";
+  $("homeSide").value = m.home_side === "right" ? "right" : "left";
+  const sc = state.data.scoring;
+  $("ytText").style.display = $("copyYt").style.display = sc ? "" : "none";
+  $("ytText").value = sc ? sc.youtube : "";
+  $("scoringInfo").textContent = sc
+    ? `Scoring: ${sc.events} score changes, final ${sc.final.home ?? "?"}:${sc.final.guest ?? "?"} (${sc.dir})`
+    : "Scores are read from the scoreboard during processing (scoring.enabled).";
 }
 
 function useCal(c, label) {
@@ -380,6 +406,20 @@ $("runAuto").onclick = async () => {
     state.data.auto = res; useCal(res, "auto (" + res.source + ")"); setStatus("Auto done (" + res.source + "). Check and Save.", "ok"); loadList();
   } catch (e) { setStatus("Auto failed: " + e.message, "err"); }
   b.disabled = false;
+};
+
+$("saveTeams").onclick = async () => {
+  try {
+    const res = await api(`/api/calibration/${encodeURIComponent(state.stem)}/match`, { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ home: $("teamHome").value, guest: $("teamGuest").value, home_side: $("homeSide").value }) });
+    state.data.match = res.match; state.data.scoring = res.scoring; showMatch();
+    setStatus(res.scoring ? "Teams saved, YouTube text regenerated." : "Teams saved. Used by the next processing.", "ok");
+  } catch (e) { setStatus("Save teams failed: " + e.message, "err"); }
+};
+$("copyYt").onclick = async () => {
+  try { await navigator.clipboard.writeText($("ytText").value); setStatus("Copied", "ok"); }
+  catch (e) { $("ytText").select(); document.execCommand("copy"); setStatus("Copied", "ok"); }
 };
 
 window.addEventListener("resize", resize);

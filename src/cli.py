@@ -235,6 +235,62 @@ def calibrate(ctx: click.Context, video_path: str, llm: bool | None, port: int):
 
 
 @cli.command()
+@click.argument("video_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--home", default=None, help="Home team name (saved for this video).")
+@click.option("--guest", default=None, help="Guest team name (saved for this video).")
+@click.option("--home-side", type=click.Choice(["left", "right"]), default=None,
+              help="Which scoreboard score is the home team (default left).")
+@click.option("--out", "out_dir", default=None, type=click.Path(file_okay=False),
+              help="Output dir (default: <paths.processed>/<video stem>).")
+@click.option("--text-only", is_flag=True,
+              help="Only rewrite csv/youtube.txt from an existing scoring.json.")
+@click.pass_context
+def score(ctx: click.Context, video_path: str, home, guest, home_side, out_dir, text_only):
+    """Read the scoreboard: scoring.json, scoring.csv and youtube.txt.
+
+    Uses the venue calibration of the video (scoreboard position, camera
+    bumps). Team names given here are stored with the calibration.
+    """
+    import copy
+
+    from .calibration import load_match, resolve_calibration, save_match
+    from .scoring import regenerate_outputs, run_scoring
+    from .utils import probe_video
+
+    cfg = copy.deepcopy(ctx.obj["config"])
+    cfg.setdefault("calibration", {})["enabled"] = True
+    match = load_match(cfg, video_path) or {}
+    if home is not None or guest is not None or home_side is not None:
+        match = {**match, **{k: v for k, v in
+                             (("home", home), ("guest", guest), ("home_side", home_side))
+                             if v is not None}}
+        save_match(cfg, video_path, match)
+        match = load_match(cfg, video_path)
+    out = Path(out_dir) if out_dir else (
+        Path(cfg.get("paths", {}).get("processed", "./data/processed")) / Path(video_path).stem)
+    if text_only:
+        paths = regenerate_outputs(cfg, out, {"match": match} if match else None)
+    else:
+        import json
+
+        meta = probe_video(video_path)
+        prev_cal = out / "calibration.json"
+        if prev_cal.is_file():  # from processing: has camera bumps already
+            cal = json.loads(prev_cal.read_text())
+            click.echo(f"Using calibration from {prev_cal}")
+        else:
+            cal = resolve_calibration(cfg, video_path, meta.duration)
+        if match:
+            cal["match"] = match
+        paths = run_scoring(cfg, video_path, cal, meta.width, meta.height, out)
+        if not paths:
+            raise click.ClickException("No scoreboard calibrated for this video")
+    click.echo(Path(paths["youtube"]).read_text())
+    for k, v in paths.items():
+        click.echo(f"{k:8s} {v}")
+
+
+@cli.command()
 @click.option("--port", default=8088, help="Dashboard server port.")
 @click.option("--host", default="0.0.0.0", help="Dashboard server host.")
 @click.pass_context
