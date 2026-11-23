@@ -111,6 +111,11 @@ def test_config() -> dict:
                 "fov_max_accel_deg_per_sec2": 4.0,
                 "fov_final_smooth_sec": 0.5,
                 "fov_hoop_zoom": {"enabled": False},
+                "static_ball_filter": {"enabled": False, "cell_px": 16, "min_frames": 150},
+                "half_court": {
+                    "enabled": False, "switch_deg": 8.0, "min_dwell_sec": 2.0,
+                    "decide_smooth_sec": 1.0, "anchor_frac": 0.5, "follow": 0.3,
+                },
                 "kalman": {
                     "process_noise": 0.1,
                     "measurement_noise": 2.0,

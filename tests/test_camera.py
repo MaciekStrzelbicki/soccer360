@@ -1111,3 +1111,61 @@ class TestCinematicCamera:
         # before the bump identical; well after it the hoop is far away -> no raise
         assert shifted[60]["pitch"] == pytest.approx(base[60]["pitch"], abs=1e-6)
         assert shifted[-30]["pitch"] < base[-30]["pitch"] - 5
+
+
+class TestBasketballFraming:
+    FPS = 30.0
+
+    def _gen(self, test_config, hoops=(-50.0, 60.0)):
+        gen = CameraPathGenerator(test_config)
+        gen.keep_in_frame = [{"yaw": h, "pitch": 0.0, "margin_deg": 0.0} for h in hoops]
+        return gen
+
+    def test_static_ball_spot_is_dropped(self, test_config):
+        test_config["camera"]["static_ball_filter"] = {
+            "enabled": True, "cell_px": 16, "min_frames": 150}
+        gen = CameraPathGenerator(test_config)
+        tracks = []
+        for i in range(600):
+            if i < 300:  # parked spare ball, slight jitter
+                ball = {"x": 500.0 + (i % 3), "y": 300.0, "confidence": 0.3}
+            else:  # moving game ball
+                ball = {"x": 100.0 + 2.0 * i, "y": 250.0, "confidence": 0.6}
+            tracks.append({"frame": i, "ball": ball})
+        out = gen._suppress_static_ball(tracks)
+        assert all(t["ball"] is None for t in out[:300])
+        assert all(t["ball"] is not None for t in out[300:])
+
+    def test_half_court_damps_wander_and_switches_once(self, test_config):
+        test_config["camera"]["half_court"] = {
+            "enabled": True, "switch_deg": 8.0, "min_dwell_sec": 2.0,
+            "decide_smooth_sec": 1.0, "anchor_frac": 0.5, "follow": 0.3}
+        gen = self._gen(test_config)  # mid-court at yaw 5, half width 55
+        n = 1200
+        t = np.arange(n)
+        # left-half play wandering +/-15 deg, then possession change to the right
+        play = np.where(t < 600, -25.0 + 15.0 * np.sin(t / 40.0),
+                        35.0 + 15.0 * np.sin(t / 40.0))
+        out = gen._half_court_yaw(play.astype(float), self.FPS)
+        left, right = out[100:550], out[700:1150]
+        assert np.ptp(left) < 0.4 * np.ptp(play[100:550])
+        assert abs(np.mean(left) - (5.0 - 27.5)) < 3.0
+        assert abs(np.mean(right) - (5.0 + 27.5)) < 3.0
+        side = np.sign(out - 5.0)
+        assert int(np.count_nonzero(np.diff(side[50:]))) == 1
+
+    def test_half_court_ignores_brief_crossing(self, test_config):
+        test_config["camera"]["half_court"] = {
+            "enabled": True, "switch_deg": 8.0, "min_dwell_sec": 2.0,
+            "decide_smooth_sec": 1.0, "anchor_frac": 0.5, "follow": 0.3}
+        gen = self._gen(test_config)
+        play = np.full(600, -25.0)
+        play[300:310] = 30.0  # 1/3 s spike across mid-court (noise)
+        out = gen._half_court_yaw(play, self.FPS)
+        assert np.all(out < 5.0)
+
+    def test_half_court_needs_two_hoops(self, test_config):
+        test_config["camera"]["half_court"] = {"enabled": True}
+        gen = self._gen(test_config, hoops=(60.0,))
+        play = np.linspace(-30, 30, 100)
+        assert np.allclose(gen._half_court_yaw(play, self.FPS), play)

@@ -88,6 +88,11 @@ velocity+acceleration-limited follow (`max_pan_accel_deg_per_sec2`, `pan_respons
 Zoom: spread-only target (`fov_from_speed: false`), ~1 s median + `fov_presmooth_sec` Gaussian, hysteresis hold
 (`fov_hysteresis_deg`, `fov_min_hold_sec`), rate/accel-limited transitions (`fov_max_rate_deg_per_sec`). Lost-ball widening only after `lost_coast_frames`.
 
+Basketball (`configs/basketball.yaml`): `camera.static_ball_filter` drops "ball" detections parked in one spot
+(COCO sports-ball mostly fires on a spare ball; ~98% of ball frames on real footage), and `camera.half_court`
+maps the play yaw onto the active half (hysteresis on mid-court between the two calibrated hoops, anchor at
+`anchor_frac`, only `follow` of in-half wander) so the camera pans once per possession change.
+
 ## Monitoring Dashboard
 
 - **Port 8088** (avoids Label Studio on 8080)

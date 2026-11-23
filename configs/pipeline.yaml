@@ -118,6 +118,17 @@ camera:
     near_deg: 15.0                  # within this yaw of a hoop: min_fov allowed
     far_deg: 35.0                   # beyond: FOV >= mid_min_fov (no zoom)
     mid_min_fov: 100.0
+  static_ball_filter:               # drop "ball" detections parked in one spot (spare ball, lamp)
+    enabled: false
+    cell_px: 16                     # detector-space grid cell
+    min_frames: 150                 # frames in a 3x3-cell spot over the whole video -> static
+  half_court:                       # basketball: frame the active half, pan once per possession change
+    enabled: false                  # needs two hoops (keep_in_frame / calibration)
+    switch_deg: 8.0                 # play must be this far past mid-court to switch halves
+    min_dwell_sec: 2.0              # min time on a half before switching back
+    decide_smooth_sec: 1.0          # smoothing of the play yaw used for the half decision
+    anchor_frac: 0.5                # framing anchor: 0 = mid-court, 1 = hoop
+    follow: 0.3                     # fraction of in-half wander the camera follows
   kalman:
     process_noise: 0.1
     measurement_noise: 2.0

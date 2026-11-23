@@ -236,6 +236,24 @@ class CameraPathGenerator:
         self.fov_hoop_far_deg = float(hz.get("far_deg", 35.0))
         self.fov_mid_min = float(hz.get("mid_min_fov", 100.0))
 
+        # Drop "ball" detections that sit in one spot for long (spare ball by
+        # the bench, a lamp, a logo): the real game ball keeps moving.
+        sb = cam_cfg.get("static_ball_filter", {}) or {}
+        self.static_ball_enabled = bool(sb.get("enabled", False))
+        self.static_ball_cell_px = max(1.0, float(sb.get("cell_px", 16.0)))
+        self.static_ball_min_frames = int(sb.get("min_frames", 150))
+
+        # Half-court framing (basketball): frame the half where the play is,
+        # follow only a fraction of the wander inside it and pan once on a
+        # change of possession. Needs two hoops (keep_in_frame/calibration).
+        hc = cam_cfg.get("half_court", {}) or {}
+        self.half_court_enabled = bool(hc.get("enabled", False))
+        self.half_court_switch_deg = float(hc.get("switch_deg", 8.0))
+        self.half_court_min_dwell_sec = float(hc.get("min_dwell_sec", 2.0))
+        self.half_court_decide_smooth_sec = float(hc.get("decide_smooth_sec", 1.0))
+        self.half_court_anchor_frac = float(hc.get("anchor_frac", 0.5))
+        self.half_court_follow = float(hc.get("follow", 0.3))
+
         kalman_cfg = cam_cfg.get("kalman", {})
         self.process_noise = kalman_cfg.get("process_noise", 0.1)
         self.measurement_noise = kalman_cfg.get("measurement_noise", 1.0)
@@ -305,6 +323,8 @@ class CameraPathGenerator:
         """
         tracks = load_json(tracks_path)
         fps = meta.fps
+        if self.static_ball_enabled:
+            tracks = self._suppress_static_ball(tracks)
 
         # Load player cluster data if available
         clusters = None
@@ -365,6 +385,51 @@ class CameraPathGenerator:
 
         logger.info("Camera path generated: %d entries", len(camera_path))
         write_json(camera_path, output_path)
+
+    def _suppress_static_ball(self, tracks: list[dict]) -> list[dict]:
+        """Remove ball positions in spots where a "ball" sits for too long.
+
+        Whole-video occupancy over cells of ``cell_px`` (detector pixels);
+        a cell whose 3x3 neighbourhood holds >= ``min_frames`` ball frames is
+        static clutter (spare ball, lamp, logo), not the game ball.
+        """
+        cell = self.static_ball_cell_px
+        counts: dict[tuple[int, int], int] = {}
+        keys: list[tuple[int, int] | None] = []
+        for t in tracks:
+            b = t.get("ball")
+            if b is None:
+                keys.append(None)
+                continue
+            k = (int(b["x"] // cell), int(b["y"] // cell))
+            counts[k] = counts.get(k, 0) + 1
+            keys.append(k)
+
+        def hood(k: tuple[int, int]) -> int:
+            return sum(
+                counts.get((k[0] + dx, k[1] + dy), 0)
+                for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+            )
+
+        static = {k for k in counts if hood(k) >= self.static_ball_min_frames}
+        if not static:
+            return tracks
+        out = []
+        dropped = 0
+        for t, k in zip(tracks, keys):
+            if k is not None and any(
+                (k[0] + dx, k[1] + dy) in static
+                for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+            ):
+                out.append({**t, "ball": None})
+                dropped += 1
+            else:
+                out.append(t)
+        logger.info(
+            "Static ball filter: dropped %d/%d ball frames in %d static spot cell(s)",
+            dropped, sum(1 for k in keys if k is not None), len(static),
+        )
+        return out
 
     def _tracks_to_angles(
         self, tracks: list[dict]
@@ -763,6 +828,8 @@ class CameraPathGenerator:
             return []
         yaw = np.array(unwrap_angles([e["yaw"] for e in entries]), dtype=float)
         pitch = np.array([e["pitch"] for e in entries], dtype=float)
+        if self.half_court_enabled:
+            yaw = self._half_court_yaw(yaw, fps)
 
         def process(x: np.ndarray, deadzone: float, trigger: float) -> np.ndarray:
             x = _gaussian_zero_phase(x, self.pan_presmooth_sec * fps)
@@ -792,6 +859,52 @@ class CameraPathGenerator:
         for e, y, p in zip(entries, yaw_s, pitch_s):
             out.append({**e, "yaw": float(y), "pitch": float(p)})
         return out
+
+    def _half_court_yaw(self, yaw: np.ndarray, fps: float) -> np.ndarray:
+        """Map the play yaw onto a half-court framing (basketball).
+
+        The hoops split the court at mid-court. A hysteresis state machine on
+        a heavily smoothed play yaw decides which half is active (switch only
+        once the play is ``switch_deg`` past mid-court and the previous half
+        was held for ``min_dwell_sec``). The target is an anchor between
+        mid-court and that half's hoop (``anchor_frac``) plus only ``follow``
+        of the play's deviation from it -- so wandering inside one half
+        barely moves the camera and a change of possession is one clean pan.
+        """
+        n = len(yaw)
+        if n == 0 or len(self.keep_in_frame) < 2:
+            if n:
+                logger.warning("half_court framing needs two hoops; skipped")
+            return yaw
+        shift = np.zeros(n)
+        for sg in self.scene_shifts or []:
+            shift[int(round(float(sg["from_sec"]) * fps)):] = float(sg["dyaw"])
+        h0 = float(self.keep_in_frame[0]["yaw"])
+        h1 = float(self.keep_in_frame[1]["yaw"])
+        span = angle_diff(h1, h0)  # signed, h0 -> h1
+        mid = h0 + span / 2.0 + shift
+        half = abs(span) / 2.0
+        rel = ((yaw - mid + 180.0) % 360.0) - 180.0
+
+        s = _gaussian_zero_phase(rel, self.half_court_decide_smooth_sec * fps)
+        sw = self.half_court_switch_deg
+        dwell = self.half_court_min_dwell_sec * fps
+        state = 1.0 if s[0] >= 0 else -1.0
+        last = -math.inf
+        side = np.empty(n)
+        for i in range(n):
+            if -state * s[i] > sw and i - last >= dwell:
+                state = -state
+                last = i
+            side[i] = state
+        anchor = side * half * self.half_court_anchor_frac
+        desired = anchor + self.half_court_follow * (rel - anchor)
+        switches = int(np.count_nonzero(np.diff(side)))
+        logger.info(
+            "Half-court framing: mid-court yaw %.1f, %d half switches (%.1f/min)",
+            float(np.median(mid)), switches, switches / max(n / fps / 60.0, 1e-9),
+        )
+        return yaw + (desired - rel)
 
     def _fov_target(self, entry: dict) -> float:
         """Per-frame zoom target (before temporal smoothing)."""

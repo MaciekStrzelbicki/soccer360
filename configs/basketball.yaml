@@ -79,6 +79,17 @@ camera:
     near_deg: 15.0
     far_deg: 35.0
     mid_min_fov: 100.0
+  # COCO "sports ball" mostly fires on a parked spare ball -> drop static spots.
+  static_ball_filter:
+    enabled: true
+  # Frame the active half; wander inside it is followed only 30%, so the
+  # camera pans once per change of possession instead of swinging.
+  half_court:
+    enabled: true
+    switch_deg: 8.0
+    min_dwell_sec: 2.0
+    anchor_frac: 0.5
+    follow: 0.3
   # Hold still, then move decisively: no small corrective drifts.
   pan_hold_trigger_deg: 12.0
   pitch_hold_trigger_deg: 10.0
