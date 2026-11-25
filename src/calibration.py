@@ -129,6 +129,29 @@ def clean_match(m: dict | None) -> dict:
         "guest": str(m.get("guest") or "").strip()[:80],
         "home_side": "right" if m.get("home_side") == "right" else "left",
     }
+    roster = clean_roster(m.get("roster"))
+    if roster:
+        out["roster"] = roster
+    return out
+
+
+def clean_roster(r) -> dict:
+    """``{"home": {"7": "Kowalski"}, "guest": {...}}`` (numbers 0-99)."""
+    out = {}
+    for side in ("home", "guest"):
+        d = (r or {}).get(side) if isinstance(r, dict) else None
+        if not isinstance(d, dict):
+            continue
+        team = {}
+        for k, v in d.items():
+            try:
+                n = int(str(k).strip().lstrip("#"))
+            except ValueError:
+                continue
+            if 0 <= n <= 99:
+                team[str(n)] = str(v or "").strip()[:60]
+        if team:
+            out[side] = team
     return out
 
 
@@ -145,7 +168,8 @@ def save_match(config: dict, video_path: str | Path, match: dict) -> Path:
     """Store team names in the per-video calibration file (creates it)."""
     p = register_video(config, video_path)
     data = json.loads(p.read_text())
-    data["match"] = clean_match(match)
+    old = data.get("match") if isinstance(data.get("match"), dict) else {}
+    data["match"] = clean_match({**old, **(match or {})})  # keeps an unsent roster
     p.write_text(json.dumps(data, indent=2))
     return p
 

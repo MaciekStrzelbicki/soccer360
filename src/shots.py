@@ -61,6 +61,10 @@ def shots_config(sc_cfg: dict) -> dict:
     c.setdefault("verify", True)          # re-ask colour/board disagreements
     c.setdefault("max_w", 1100)           # px per frame sent to the LLM
     c.setdefault("player_class", 0)
+    own = c.get("llm") or {}
+    c["llm"] = {**(sc_cfg.get("llm") or {}), **own}
+    if "model" not in own:  # measured: as good as gpt-5 here at ~1/7 of the cost
+        c["llm"]["model"] = "gpt-5-mini"
     return c
 
 
@@ -352,13 +356,26 @@ class OpenAIShotReader:
         if not key:
             raise RuntimeError(f"{env} is not set")
         self.model = llm_cfg.get("model", "gpt-5")
+        self.effort = llm_cfg.get("reasoning_effort")  # minimal|low|medium|high
+        self.usage = {"input": 0, "output": 0, "reasoning": 0}
         self.client = OpenAI(api_key=key, timeout=float(llm_cfg.get("timeout_sec", 300)),
                              max_retries=4)
         self.max_w = max_w
         self.calls = 0
+        self.dead: str | None = None   # set when the account has no credits
         self._lock = threading.Lock()
 
     def __call__(self, frames: list[np.ndarray], prompt: str) -> dict:
+        if self.dead:  # don't upload frames for requests that cannot run
+            raise RuntimeError(self.dead)
+        try:
+            return self._call(frames, prompt)
+        except Exception as exc:
+            if "insufficient_quota" in str(exc) or "no credits" in str(exc):
+                self.dead = f"OpenAI: no credits left ({exc.__class__.__name__})"
+            raise
+
+    def _call(self, frames: list[np.ndarray], prompt: str) -> dict:
         # Frames go up through the Files API and the request only names them:
         # big inline base64 requests were dropped mid-upload ("Server
         # disconnected"), small file uploads are reliable.
@@ -371,9 +388,10 @@ class OpenAIShotReader:
                     purpose="vision").id)
                 content.append({"type": "input_text", "text": f"#{i}"})
                 content.append({"type": "input_image", "file_id": ids[-1], "detail": "high"})
+            extra = {"reasoning": {"effort": self.effort}} if self.effort else {}
             resp = self.client.responses.create(
                 model=self.model, input=[{"role": "user", "content": content}],
-                text={"format": {"type": "json_object"}},
+                text={"format": {"type": "json_object"}}, **extra,
             )
         finally:
             for fid in ids:
@@ -383,7 +401,19 @@ class OpenAIShotReader:
                     logger.debug("Could not delete uploaded frame %s", fid)
         with self._lock:
             self.calls += 1
+            u = getattr(resp, "usage", None)
+            if u is not None:
+                self.usage["input"] += int(getattr(u, "input_tokens", 0) or 0)
+                self.usage["output"] += int(getattr(u, "output_tokens", 0) or 0)
+                det = getattr(u, "output_tokens_details", None)
+                self.usage["reasoning"] += int(getattr(det, "reasoning_tokens", 0) or 0)
         return json.loads(resp.output_text or "{}")
+
+    def summary(self) -> str:
+        u = self.usage
+        return (f"{self.model} ({self.effort or 'default'} effort): {self.calls} requests, "
+                f"{u['input']} input / {u['output']} output tokens "
+                f"({u['reasoning']} reasoning)")
 
 
 def _jpeg_bytes(img_rgb: np.ndarray, max_w: int) -> bytes:
@@ -451,7 +481,33 @@ def colour_teams(events: list[dict], reads: dict) -> dict | None:
     return {"home": h, "guest": 1 - h, "votes": tally}
 
 
-def apply_shots(result: dict, doc: dict | None) -> dict:
+def pick_number(read: dict, num: dict | None, edit: dict | None) -> dict:
+    """Final jersey number: manual edit > stage-3 read > stage-2 guess.
+
+    ``number_src``: edit | read | shot | read_low (shown only as a hint);
+    ``number_check``: the two automatic reads disagree.
+    """
+    if edit is not None and "number" in edit:
+        return {"number": edit["number"], "number_src": "edit"}
+    guess = read.get("number")
+    n3 = (num or {}).get("number")
+    c3 = (num or {}).get("confidence")
+    if n3 is not None and c3 in ("high", "medium"):
+        out = {"number": n3, "number_src": "read"}
+        if guess is not None and guess != n3:
+            out["number_check"] = True
+        return out
+    if guess is not None:
+        out = {"number": guess, "number_src": "shot"}
+        if n3 is not None and n3 != guess:
+            out["number_check"] = True
+        return out
+    if n3 is not None:
+        return {"number": n3, "number_src": "read_low"}
+    return {"number": None, "number_src": None}
+
+
+def apply_shots(result: dict, doc: dict | None, edits: dict | None = None) -> dict:
     """Merge ``shots.json`` into ``result`` events (in place); returns it.
 
     Adds per event ``shot`` (time, shooter colour, agreement with the board,
@@ -471,10 +527,13 @@ def apply_shots(result: dict, doc: dict | None) -> dict:
         }
     for e in result["events"]:
         r = reads.get(_ekey(e))
-        if not r or r.get("shot_t") is None:
+        if not r or r.get("shot_t") is None or e.get("points", 0) <= 0:
             continue
         shot = {"t": r["shot_t"], "confidence": r.get("confidence"),
-                "number_guess": r.get("number"), "crop": r.get("crop")}
+                "number_guess": r.get("number"), "crop": r.get("crop"),
+                "grid": r.get("grid")}
+        shot.update(pick_number(r, (doc.get("numbers") or {}).get(_ekey(e)),
+                                (edits or {}).get(_ekey(e))))
         c = r.get("team")
         if c is not None and colours:
             shot["colour"] = colours["teams"][c]["name"]["pl"]
@@ -560,7 +619,7 @@ def find_shots(
 
     def read(frames, prompt):  # LLM client only when something is asked
         if llm[0] is None:
-            llm[0] = OpenAIShotReader(sc_cfg["llm"], max_w=int(cfg["max_w"]))
+            llm[0] = OpenAIShotReader(cfg["llm"], max_w=int(cfg["max_w"]))
         return llm[0](frames, prompt)
 
     feats: list[np.ndarray] = []
@@ -639,6 +698,21 @@ def find_shots(
                 run_all([(e, mapping[e["team"]]) for e in redo])
     _ensure_crops(evs, reads, video_path, crops_dir, fps)
     doc_path.write_text(json.dumps(doc, indent=1))
+    if isinstance(llm[0], OpenAIShotReader):
+        logger.info("Shooters LLM: %s", llm[0].summary())
+    from .jerseys import jerseys_config, read_numbers
+    jc = jerseys_config(sc_cfg)
+    if jc["enabled"]:
+        nllm: list = [reader]
+
+        def nread(frames, prompt):
+            if nllm[0] is None:
+                nllm[0] = OpenAIShotReader(jc["llm"], max_w=2000)
+            return nllm[0](frames, prompt)
+
+        read_numbers(sc_cfg, video_path, evs, doc, players, width, height, fps, out_dir, nread)
+        if isinstance(nllm[0], OpenAIShotReader):
+            logger.info("Jersey numbers LLM: %s", nllm[0].summary())
     return doc
 
 

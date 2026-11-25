@@ -214,7 +214,8 @@ function showMatch() {
   $("shotInfo").style.display = sc && (cols || sc.shots) ? "" : "none";
   $("shotInfo").innerHTML = !sc ? "" :
     (cols ? `Shirts: ${esc($("teamHome").value || "Home")} ${sw(cols.home)} ${esc(cols.home.name)} · ${esc($("teamGuest").value || "Guest")} ${sw(cols.guest)} ${esc(cols.guest.name)}. ` : "")
-    + (sc.shots ? `Shooter found for ${sc.shots}/${sc.events} baskets, shirt matches the board in ${sc.colour_ok}.` : "");
+    + (sc.shots ? `Shooter found for ${sc.shots}/${sc.events} baskets, shirt matches the board in ${sc.colour_ok}. ` : "")
+    + (sc.shots ? `<a href="/scoring/${encodeURIComponent(state.stem || "")}" style="color:var(--accent)">Shooters &amp; numbers →</a>` : "");
 }
 
 function useCal(c, label) {

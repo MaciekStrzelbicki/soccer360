@@ -27,6 +27,7 @@ Runtime modes in `src/pipeline.py`:
 - `src/dashboard.py`: FastAPI monitoring dashboard + REST API + SSE stream + training management
 - `src/scoring.py`: scores from the calibrated scoreboard (keyframe crops -> local change detection -> vision-LLM reads of board states) -> `scoring.json`/`scoring.csv`/`youtube.txt`; team names in calibration file `match`; CLI `score`
 - `src/shots.py`: scoring stage 2 — attacked basket from player detections, shirt-colour clustering, vision-LLM shooter per basket -> `shots.json` + `shots/*.jpg`; `apply_shots` merges into score events (shot-time timestamps)
+- `src/jerseys.py`: scoring stage 3 — shooter tracked ±2 s through detections, crop grid per basket, `gpt-5-mini` reads jersey numbers; manual edits (`shots.json` `edits`) win; review page `/scoring/{stem}` (`src/static/scoring.html`) with roster (`match.roster`)
 - `src/camera.py`: camera path generation — hybrid ball+cluster → Kalman → EMA → deadband → FOV EMA smoothing
 - `src/metrics.py`: PhaseTimer (context-manager timing) + gpu_utilization_snapshot (nvidia-smi) + cpu_ram_snapshot (/proc)
 - `src/static/index.html`: single-page dashboard UI (vanilla JS/CSS, EventSource SSE)

@@ -50,6 +50,65 @@ class TestClean:
         assert scoring._clean_series([5, None, 9, None, 5]) == [5, None, 5, None, 5]
 
 
+class TestScorerCorrections:
+    """The table operator's mistakes, fixed later on the board."""
+
+    @staticmethod
+    def _ev(tl):
+        res = scoring.derive_events(_reads([(t, h, g, 1) for t, h, g in tl]))
+        return res, [(e["board_t"], e["team"], e["points"], e.get("flag"), e["home"], e["guest"])
+                     for e in res["events"]]
+
+    def test_basket_taken_back_later(self):
+        res, ev = self._ev([(0, 10, 8), (10, 12, 8), (20, 12, 8), (60, 12, 10),
+                            (100, 10, 10), (110, 10, 10)])
+        assert ev == [(10, "home", 0, "cancelled", 10, 8), (60, "guest", 2, None, 10, 10),
+                      (100, "home", -2, "correction", 10, 10)]
+        txt = scoring.youtube_text(res, scoring.match_info(None))
+        assert "Gospodarze +" not in txt and "Goście +2" in txt
+
+    def test_three_corrected_to_two(self):
+        res, ev = self._ev([(0, 10, 8), (10, 13, 8), (20, 13, 8), (30, 12, 8), (40, 12, 8)])
+        assert ev[0] == (10, "home", 2, "corrected", 12, 8)
+        assert res["events"][0]["board_points"] == 3
+        # shown only once before the fix (a single board state)
+        _, ev = self._ev([(0, 10, 8), (10, 13, 8), (20, 12, 8), (30, 12, 8)])
+        assert ev[0] == (10, "home", 2, "corrected", 12, 8)
+
+    def test_wrong_team_moved_to_original_time(self):
+        res, ev = self._ev([(0, 10, 8), (10, 12, 8), (20, 12, 8), (30, 10, 8),
+                            (35, 10, 10), (45, 10, 10)])
+        assert ev[0] == (10, "home", 0, "cancelled", 10, 8)
+        assert ev[1] == (10.01, "guest", 2, "moved", 10, 10)
+        assert res["events"][1]["entered_t"] == 35
+        assert res["final"] == {"home": 10, "guest": 10}
+
+    def test_wrong_team_fixed_in_one_step(self):
+        # home 12 visible for one state, then home 10 + guest 10 together
+        res, ev = self._ev([(0, 10, 8), (10, 12, 8), (20, 10, 10), (30, 10, 10)])
+        assert ev == [(10.01, "guest", 2, "moved", 10, 10)]
+
+    def test_misread_blip_alone_changes_nothing(self):
+        _, ev = self._ev([(0, 10, 8), (10, 12, 8), (20, 10, 8), (30, 10, 8)])
+        assert ev == []
+
+    def test_genuine_basket_far_from_correction_not_moved(self):
+        _, ev = self._ev([(0, 10, 8), (10, 12, 8), (20, 12, 10), (100, 10, 10),
+                          (110, 10, 10)])
+        assert (20, "guest", 2, None, 10, 10) in ev
+
+    def test_manual_edits_and_undo(self):
+        res, _ = self._ev([(0, 10, 8), (10, 12, 8), (20, 12, 8), (30, 12, 10), (40, 12, 10)])
+        scoring.apply_event_edits(res, {"10.00": {"cancel": True}, "30.00": {"points": 3}})
+        ev = [(e["team"], e["points"], e.get("flag"), e["home"], e["guest"]) for e in res["events"]]
+        assert ev == [("home", 0, "edited", 10, 8), ("guest", 3, "edited", 10, 11)]
+        scoring.apply_event_edits(res, {"30.00": {"team": "home"}})
+        ev = [(e["team"], e["points"], e.get("flag"), e["home"], e["guest"]) for e in res["events"]]
+        assert ev == [("home", 2, None, 12, 8), ("home", 2, "edited", 14, 8)]
+        scoring.apply_event_edits(res, {})
+        assert [(e["team"], e["points"]) for e in res["events"]] == [("home", 2), ("guest", 2)]
+
+
 class TestEvents:
     def test_basic_events_and_periods(self):
         tl = _reads([
@@ -226,7 +285,7 @@ class TestMatchStorage:
 
     def test_match_info_defaults(self):
         m = scoring.match_info(None)
-        assert m == {"home": "Gospodarze", "guest": "Goście", "home_side": "left"}
+        assert m == {"home": "Gospodarze", "guest": "Goście", "home_side": "left", "roster": {}}
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg missing")

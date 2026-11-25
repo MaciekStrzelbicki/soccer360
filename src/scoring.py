@@ -38,6 +38,7 @@ import cv2
 import numpy as np
 
 from .calibration import _jpeg_b64, pitch_to_y, shift_at, yaw_to_x
+from .jerseys import jerseys_config
 from .shots import apply_shots, find_shots, shots_config
 
 logger = logging.getLogger("soccer360.scoring")
@@ -71,7 +72,18 @@ def match_info(cal: dict | None) -> dict:
     m["home"] = (m.get("home") or "").strip() or "Gospodarze"
     m["guest"] = (m.get("guest") or "").strip() or "Goście"
     m["home_side"] = "right" if m.get("home_side") == "right" else "left"
+    m["roster"] = m.get("roster") or {}
     return m
+
+
+def player_label(e: dict, match: dict, uncertain: bool = False) -> str:
+    """"#7 Kowalski" for an event's shooter ("" when unknown)."""
+    sh = e.get("shot") or {}
+    n = sh.get("number")
+    if n is None or (sh.get("number_src") == "read_low" and not uncertain):
+        return ""
+    name = ((match.get("roster") or {}).get(e["team"]) or {}).get(str(n), "")
+    return f"#{n} {name}".strip()
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +260,7 @@ _READ_PROMPT = """The numbered tiles (#0, #1, ...) show the SAME electronic bask
 
 Top row of the board: the LEFT team score, the period (small, middle), the RIGHT team score. Ignore the game clock, fouls and timeouts.
 {context}
-Scores never go down (except rare corrections) and rise by at most 3 between neighbouring images. Compare neighbouring images digit by digit to decide blurry digits (5 vs 6 vs 8, 1 vs 7, 3 vs 8). Use null only when the board is off, occluded or unreadable.
+A score usually rises by 1, 2 or 3 between neighbouring images; the table operator sometimes corrects a mistake, so a score CAN go down - always report what the board shows, do not \"fix\" it. Compare neighbouring images digit by digit to decide blurry digits (5 vs 6 vs 8, 1 vs 7, 3 vs 8). Use null only when the board is off, occluded or unreadable.
 
 Respond with JSON only:
 {{"tiles": [{{"i": 0, "left": int|null, "right": int|null, "period": int|null}}, ...]}}"""
@@ -273,6 +285,7 @@ class OpenAIScoreReader:
         if not key:
             raise RuntimeError(f"{env} is not set")
         self.model = llm_cfg.get("model", "gpt-5")
+        self.effort = llm_cfg.get("reasoning_effort")
         self.client = OpenAI(api_key=key, timeout=float(llm_cfg.get("timeout_sec", 180)))
         self.calls = 0
 
@@ -289,10 +302,11 @@ class OpenAIScoreReader:
                 "url": f"data:image/jpeg;base64,{_jpeg_b64(big, max_w=768)}",
                 "detail": "high",
             }})
+        extra = {"reasoning_effort": self.effort} if self.effort else {}
         resp = self.client.chat.completions.create(
             model=self.model,
             response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": content}],
+            messages=[{"role": "user", "content": content}], **extra,
         )
         self.calls += 1
         data = json.loads(resp.choices[0].message.content or "{}")
@@ -412,10 +426,16 @@ def read_states(
 # 4. Cleaning + events
 # ---------------------------------------------------------------------------
 
-def _clean_series(vals: list[int | None]) -> list[int | None]:
+def _clean_series(vals: list[int | None], max_points: int | None = None,
+                  blips: list | None = None) -> list[int | None]:
     """Fix lone misreads: v[i] differs from equal neighbours -> neighbours' value.
 
-    Neighbours = nearest readable values on each side.
+    Neighbours = nearest readable values on each side.  With ``max_points``:
+    a lone value 1..max_points above equal neighbours is also what a scorer's
+    mistake looks like (points added, then taken back) -> recorded in
+    ``blips`` as ``(index, points)``; and a value that overshoots a later
+    smaller rise (10, 13, 12: a 3 corrected to a 2) is kept, so the basket
+    keeps its original time and :func:`reconcile_corrections` fixes the points.
     """
     out = list(vals)
     idx = [i for i, v in enumerate(vals) if v is not None]
@@ -423,13 +443,118 @@ def _clean_series(vals: list[int | None]) -> list[int | None]:
         a, i, b = vals[idx[k - 1]], vals[idx[k]], vals[idx[k + 1]]
         if a == b and i != a:
             out[idx[k]] = a
+            if blips is not None and max_points and 0 < i - a <= max_points:
+                blips.append((idx[k], i - a))
     # value seen once and not between its neighbours (e.g. 18 between 12 and 14)
     idx = [i for i, v in enumerate(out) if v is not None]
     for k in range(1, len(idx) - 1):
         a, i, b = out[idx[k - 1]], out[idx[k]], out[idx[k + 1]]
         if not (min(a, b) <= i <= max(a, b)):
+            if max_points and a < b < i and i - a <= max_points:
+                continue  # scorer's correction of the points, not a misread
             out[idx[k]] = a
     return out
+
+
+def reconcile_corrections(result: dict, blips: list[dict] | None = None,
+                          window_sec: float = 180.0, swap_sec: float = 20.0) -> dict:
+    """Undo the scorer's mistakes the board later corrected (in place).
+
+    * a score drop of d for a team is taken off that team's latest baskets
+      (within ``window_sec``): +3 then -1 -> a 2-pointer at the original time,
+      +2 then -2 -> the basket is cancelled (points 0, flag ``cancelled``);
+    * points cancelled for one team and given to the other team within
+      ``swap_sec`` of the correction (the scorer fixing both at once) are the
+      same basket entered for the wrong team: the other team's basket gets
+      the original time (flag ``moved``);
+    * ``blips`` (points shown only briefly, see :func:`_clean_series`) can be
+      such a wrong-team entry too.
+    Running scores are recounted.
+    """
+    events = sorted(result["events"], key=lambda e: e["board_t"])
+    wrong: list[tuple[float, str, int, float]] = []  # (orig t, team, points, corr t)
+    for j, e in enumerate(events):
+        if e["points"] >= 0:
+            continue
+        need = -e["points"]
+        for c in reversed(events[:j]):
+            if need <= 0 or c["board_t"] < e["board_t"] - window_sec:
+                break
+            if c["team"] != e["team"] or c["points"] <= 0 or c.get("flag") == "check":
+                continue  # a >3 jump needs a human look anyway
+            take = min(c["points"], need)
+            c.setdefault("board_points", c["points"])
+            c["points"] -= take
+            need -= take
+            c["flag"] = "cancelled" if c["points"] == 0 else "corrected"
+            wrong.append((c["board_t"], c["team"], take, e["board_t"]))
+        e["flag"] = "correction"
+        e["unmatched"] = need
+    for b in blips or []:
+        wrong.append((b["t"], b["team"], b["points"], b["t_end"]))
+    moved: set[int] = set()
+    for t0, team, pts, t_corr in sorted(wrong):
+        for k, f in enumerate(events):
+            if (k in moved or f["team"] == team or f["points"] != pts
+                    or f.get("flag") or f["board_t"] <= t0
+                    or abs(f["board_t"] - t_corr) > swap_sec):
+                continue
+            f["entered_t"] = f["board_t"]
+            f["board_t"] = round(t0 + 0.01, 2)  # key differs from the cancelled one
+            f["flag"] = "moved"
+            moved.add(k)
+            break
+    result["events"] = sorted(events, key=lambda e: e["board_t"])
+    recount(result)
+    return result
+
+
+def recount(result: dict) -> None:
+    """Running score after every event (corrections count only the part
+    that could not be taken off an earlier basket)."""
+    run = {s: (result.get("start") or {}).get(s) for s in SIDES}
+    for ev in result["events"]:
+        eff = -ev.get("unmatched", 0) if ev.get("flag") == "correction" else ev["points"]
+        run[ev["team"]] = (run[ev["team"]] or 0) + eff
+        ev["home"], ev["guest"] = run["home"], run["guest"]
+
+
+def apply_event_edits(result: dict, edits: dict | None) -> dict:
+    """Manual fixes from the review page (in place): ``{key: {"cancel": true}
+    | {"team": "home"|"guest"} | {"points": 1..3}}`` (``number`` handled by
+    the shots).  Originals are kept in ``orig`` so removing an edit restores
+    them."""
+    for e in result["events"]:
+        o = e.pop("orig", None)
+        if o:
+            e.update(o)
+            if e.get("flag") == "edited":
+                e.pop("flag")
+    for e in result["events"]:
+        ed = (edits or {}).get(f"{float(e['board_t']):.2f}") or {}
+        change = {}
+        if ed.get("cancel"):
+            change["points"] = 0
+        else:
+            if ed.get("team") in SIDES and ed["team"] != e["team"]:
+                change["team"] = ed["team"]
+            if isinstance(ed.get("points"), int) and 1 <= ed["points"] <= 3:
+                change["points"] = ed["points"]
+        if change and e.get("flag") != "correction":
+            e["orig"] = {k: e.get(k) for k in ("team", "points", "flag")}
+            e.update(change)
+            e["flag"] = "edited"
+    recount(result)
+    return result
+
+
+def load_edits(out_dir: str | Path) -> dict:
+    """Manual fixes per event key (``edits.json``, written by the dashboard)."""
+    p = Path(out_dir) / "edits.json"
+    try:
+        return json.loads(p.read_text()).get("events", {}) if p.is_file() else {}
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return {}
 
 
 def derive_events(timeline: list[dict], home_side: str = "left",
@@ -442,7 +567,9 @@ def derive_events(timeline: list[dict], home_side: str = "left",
     """
     ts = [r["t"] for r in timeline]
     side_key = {"home": home_side, "guest": "right" if home_side == "left" else "left"}
-    series = {s: _clean_series([r.get(side_key[s]) for r in timeline]) for s in SIDES}
+    raw_blips: dict[str, list] = {s: [] for s in SIDES}
+    series = {s: _clean_series([r.get(side_key[s]) for r in timeline], max_points,
+                               raw_blips[s]) for s in SIDES}
     period = _clean_series([r.get("period") for r in timeline])
 
     events: list[dict] = []
@@ -475,13 +602,11 @@ def derive_events(timeline: list[dict], home_side: str = "left",
             elif delta > max_points:
                 ev["flag"] = "check"
             events.append(ev)
-    # running score after every event (other side may be unknown early on)
-    run = {s: start.get(s) for s in SIDES}
-    for ev in events:
-        run[ev["team"]] = (run[ev["team"]] or 0) + ev["points"]
-        ev["home"], ev["guest"] = run["home"], run["guest"]
-    return {"start": start, "events": events, "periods": periods,
-            "final": {s: cur[s] for s in SIDES}}
+    blips = [{"t": ts[j], "t_end": ts[min(j + 1, len(ts) - 1)], "team": s, "points": p}
+             for s in SIDES for j, p in raw_blips[s]]
+    result = {"start": start, "events": events, "periods": periods,
+              "final": {s: cur[s] for s in SIDES}}
+    return reconcile_corrections(result, blips)
 
 
 # ---------------------------------------------------------------------------
@@ -505,8 +630,23 @@ def _score(ev: dict) -> str:
     return f"{h}:{g}"
 
 
+def scorers_lines(pts: list[dict], match: dict, names: dict) -> list[str]:
+    """"Strzelcy:" section: points per known player, per team."""
+    out = []
+    for side in SIDES:
+        tally: dict[str, int] = {}
+        for e in pts:
+            who = player_label(e, match)
+            if e["team"] == side and who:
+                tally[who] = tally.get(who, 0) + e["points"]
+        if tally:
+            best = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+            out.append(f"{names[side]}: " + ", ".join(f"{w} {p}" for w, p in best))
+    return (["Strzelcy:"] + out + [""]) if out else []
+
+
 def youtube_text(result: dict, match: dict, lead_sec: float = 6.0,
-                 chapters: bool = True) -> str:
+                 chapters: bool = True, players: bool = True) -> str:
     names = {"home": match["home"], "guest": match["guest"]}
     fin = result.get("final") or {}
     lines = [f"{names['home']} – {names['guest']}  "
@@ -534,8 +674,12 @@ def youtube_text(result: dict, match: dict, lead_sec: float = 6.0,
         lines.append("Punkty:")
         for e in pts:
             t = e.get("t", e["board_t"] - lead_sec)
-            lines.append(f"{fmt_ts(t)} {_score(e)} {names[e['team']]} +{e['points']}")
+            who = player_label(e, match) if players else ""
+            lines.append(f"{fmt_ts(t)} {_score(e)} {names[e['team']]} +{e['points']}"
+                         + (f" – {who}" if who else ""))
         lines.append("")
+        if players:
+            lines += scorers_lines(pts, match, names)
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -561,7 +705,8 @@ def write_outputs(out_dir: Path, result: dict, match: dict, sc_cfg: dict) -> dic
         w = csv.writer(f)
         w.writerow(["timestamp", "t_sec", "board_t_sec", "period", "team",
                     "team_name", "points", "home", "guest", "flag", "shot_t_sec",
-                    "shooter_colour", "colour_ok", "number_guess", "shot_crop"])
+                    "shooter_colour", "colour_ok", "number", "player", "number_src",
+                    "number_check", "shot_crop", "board_points", "entered_t_sec"])
         for e in result["events"]:
             sh = e.get("shot") or {}
             ok = sh.get("colour_ok")
@@ -569,10 +714,14 @@ def write_outputs(out_dir: Path, result: dict, match: dict, sc_cfg: dict) -> dic
                         e["team"], e["team_name"], e["points"], e.get("home"),
                         e.get("guest"), e.get("flag", ""), sh.get("t", ""),
                         sh.get("colour", ""), "" if ok is None else int(ok),
-                        "" if sh.get("number_guess") is None else sh["number_guess"],
-                        sh.get("crop", "")])
+                        "" if sh.get("number") is None else sh["number"],
+                        player_label(e, match, uncertain=True),
+                        sh.get("number_src") or "", int(bool(sh.get("number_check"))),
+                        sh.get("crop", ""), e.get("board_points", ""),
+                        e.get("entered_t", "")])
     paths["youtube"].write_text(
-        youtube_text(result, match, lead, bool(sc_cfg.get("chapters", True)))
+        youtube_text(result, match, lead, bool(sc_cfg.get("chapters", True)),
+                     bool(jerseys_config(sc_cfg)["in_youtube"]))
     )
     return {k: str(v) for k, v in paths.items()}
 
@@ -635,11 +784,12 @@ def run_scoring(
             try:
                 doc = find_shots(config, sc, video_path, cal, result["events"],
                                  width, height, fps, det, out_dir, reader=shot_reader)
-                apply_shots(result, doc)
+                apply_shots(result, doc, load_edits(out_dir))
             except Exception:
                 logger.exception("Shooters failed; scores without shots")
         else:
             logger.warning("Shooters skipped: no detections at %s", det)
+    apply_event_edits(result, load_edits(out_dir))
     paths = write_outputs(out_dir, result, match, sc)
     logger.info(
         "Scoring: %d events, final %s %s:%s %s -> %s",
@@ -681,7 +831,9 @@ def regenerate_outputs(config: dict, out_dir: str | Path, cal: dict | None) -> d
     for e in result["events"]:  # re-derived below (mapping depends on sides)
         e.pop("shot", None)
         e.pop("shot_t", None)
+    edits = load_edits(out_dir)
     shots = out_dir / "shots.json"
     if shots.is_file():
-        apply_shots(result, json.loads(shots.read_text()))
+        apply_shots(result, json.loads(shots.read_text()), edits)
+    apply_event_edits(result, edits)
     return write_outputs(out_dir, result, match, scoring_config(config))

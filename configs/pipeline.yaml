@@ -350,6 +350,7 @@ scoring:                            # scores from the scoreboard (needs calibrat
   tile_scale: 3.0
   lead_sec: 6.0                     # timestamps = board update minus this
   max_points: 3                     # bigger jumps are flagged "check"
+  # llm: {model: gpt-5, reasoning_effort: medium}   # scoreboard reads (~12 requests/game)
   chapters: true                    # period chapters in youtube.txt
   shooters:                         # shot moment + shooter + shirt colours (needs detections, 2 hoops)
     enabled: false
@@ -360,6 +361,19 @@ scoring:                            # scores from the scoreboard (needs calibrat
     workers: 4                      # parallel LLM requests
     verify: true                    # re-ask events whose shirt colour disagrees with the board
     max_w: 1100                     # px width per frame sent to the LLM
+    llm:                            # cost: ~76 requests/game; gpt-5-mini ~$0.5, gpt-5 ~$3.3
+      model: gpt-5-mini
+      # reasoning_effort: low       # minimal | low | medium (default) | high
+  numbers:                          # shooter's jersey number (needs shooters)
+    enabled: false
+    track_sec: 2.0                  # follow the shooter +- this around the shot
+    step_frames: 6                  # tracking step in frames
+    samples: 8                      # shooter crops per basket on the grid sent to the LLM
+    per_request: 6                  # baskets per LLM request
+    in_youtube: true                # "#7 Kowalski" + scorers list in youtube.txt
+    llm:                            # plain OCR on crop grids: ~$0.02/game
+      model: gpt-5-mini
+      reasoning_effort: low
 
 dashboard:
   enabled: true

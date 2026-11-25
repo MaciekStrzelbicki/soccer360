@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Soccer360 · Strzelcy</title>
+<style>
+  :root {
+    --bg: #081019; --surface: rgba(14, 20, 30, 0.96); --border: rgba(113, 132, 158, 0.24);
+    --text: #edf3fb; --muted: #92a0b2; --accent: #5c97ff; --green: #43c983;
+    --yellow: #f1b557; --red: #e27872;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: linear-gradient(180deg, #081019 0%, #0a131d 100%); color: var(--text);
+    font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif; font-size: 14px;
+    line-height: 1.42; padding: 16px; min-height: 100vh; }
+  a, button, input, textarea { font: inherit; color: inherit; }
+  a { color: var(--accent); text-decoration: none; }
+  .shell { max-width: 1500px; margin: 0 auto; display: grid; grid-template-columns: 340px 1fr; gap: 14px; }
+  @media (max-width: 900px) { .shell { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 14px; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 14px 0 8px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  button { background: rgba(255,255,255,.04); border: 1px solid var(--border); border-radius: 10px;
+    padding: 7px 10px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  textarea, input { background: #0d1722; border: 1px solid var(--border); border-radius: 8px; padding: 6px; }
+  textarea { width: 100%; font: 12px ui-monospace, monospace; }
+  .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px;
+    border: 1px solid #fff4; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11px; color: var(--muted); font-weight: 500; padding: 4px 6px;
+    border-bottom: 1px solid var(--border); position: sticky; top: 0; background: #0e141e; }
+  td { padding: 6px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  td img { height: 92px; border-radius: 6px; cursor: zoom-in; display: block; }
+  td.num input { width: 58px; text-align: center; font-size: 16px; }
+  tr.changed td.num input { border-color: var(--yellow); }
+  tr.off td { opacity: .45; }
+  tr.corr td { font-size: 12px; color: var(--muted); }
+  td.act { white-space: nowrap; }
+  td.act button, td.act select { padding: 3px 6px; font-size: 12px; border-radius: 8px; }
+  select { background: #0d1722; border: 1px solid var(--border); color: var(--text); }
+  .badge { font-size: 10px; padding: 1px 6px; border-radius: 99px; border: 1px solid var(--border); white-space: nowrap; }
+  .b-edit { border-color: var(--green); color: var(--green); }
+  .b-read { border-color: var(--accent); color: var(--accent); }
+  .b-low, .b-check, .b-bad { border-color: var(--yellow); color: var(--yellow); }
+  .b-bad { border-color: var(--red); color: var(--red); }
+  .filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  #zoom { position: fixed; inset: 0; background: #000c; display: none; align-items: center;
+    justify-content: center; z-index: 9; cursor: zoom-out; }
+  #zoom img { max-width: 95vw; max-height: 92vh; }
+  #status { min-height: 18px; margin-top: 6px; }
+  .ok { color: var(--green); } .err { color: var(--red); }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="card">
+    <h1 id="title">Strzelcy</h1>
+    <p class="muted" id="sub"></p>
+    <p style="margin-top:6px"><a id="calLink" href="#">Kalibracja / nazwy drużyn →</a></p>
+
+    <h2>Skład (numer nazwisko, jedna linia na zawodnika)</h2>
+    <p class="muted" id="homeLbl">Gospodarze</p>
+    <textarea id="rosterHome" rows="7" placeholder="4 Kowalski&#10;15 Nowak"></textarea>
+    <p class="muted" id="guestLbl" style="margin-top:6px">Goście</p>
+    <textarea id="rosterGuest" rows="7" placeholder="7 Wiśniewski"></textarea>
+    <button id="saveRoster" style="margin-top:6px">Zapisz skład</button>
+
+    <h2>Opis YouTube</h2>
+    <textarea id="yt" rows="16" readonly></textarea>
+    <button id="copyYt" style="margin-top:4px">Kopiuj</button>
+    <div id="status" class="muted"></div>
+  </div>
+
+  <div class="card">
+    <div class="filters">
+      <label><input type="checkbox" id="fCheck"> tylko do sprawdzenia</label>
+      <span class="muted" id="counts"></span>
+      <span style="flex:1"></span>
+      <button class="primary" id="saveEdits" disabled>Zapisz numery</button>
+    </div>
+    <p class="muted" style="margin-bottom:8px">Kliknij zdjęcie, by zobaczyć rzucającego z kilku klatek. Wpisz numer
+      (pusty = nieznany) i zapisz; poprawka ma pierwszeństwo przed odczytem automatycznym.
+      „×” cofa poprawkę.</p>
+    <table>
+      <thead><tr><th>Czas</th><th>Wynik</th><th>Drużyna</th><th>Pkt</th><th>Rzucający</th>
+        <th>Numer</th><th>Źródło</th><th>Zawodnik</th><th>Kosz</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</div>
+<div id="zoom"><img alt=""></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const stem = decodeURIComponent(location.pathname.split("/").filter(Boolean).pop());
+const state = { data: null, dirty: {} };
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}
+function setStatus(msg, cls) { $("status").className = cls || "muted"; $("status").textContent = msg; }
+function img(path) { return path ? `/api/scoring/${encodeURIComponent(stem)}/file/${encodeURIComponent(path.split("/").pop())}` : ""; }
+function rosterText(r) { return Object.entries(r || {}).sort((a, b) => +a[0] - +b[0]).map(([n, name]) => `${n} ${name}`.trim()).join("\n"); }
+
+const SRC = { edit: ["poprawka", "b-edit"], read: ["odczyt", "b-read"], shot: ["z rzutu", "b-read"],
+              read_low: ["niepewny", "b-low"] };
+
+function needsCheck(e) {
+  const s = e.shot || {};
+  if (["cancelled", "corrected", "moved", "check"].includes(e.flag)) return true;
+  if (e.points <= 0) return false;
+  return !e.shot || s.colour_ok === false || s.number_check || s.number == null || s.number_src === "read_low";
+}
+function mmss(t) { t = Math.max(0, Math.floor(t)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; }
+function flagBadge(e) {
+  const other = e.team === "home" ? state.data.match.guest : state.data.match.home;
+  return {
+    cancelled: `<span class="badge b-bad" title="tablica cofnęła te punkty">anulowany przez stolik</span>`,
+    corrected: `<span class="badge b-check" title="stolik zmienił liczbę punktów">stolik: ${e.board_points}→${e.points}</span>`,
+    moved: `<span class="badge b-check" title="stolik najpierw wpisał punkty drużynie ${esc(other)}, potem przeniósł">przeniesiony (wpisany ${mmss(e.entered_t)})</span>`,
+    edited: `<span class="badge b-edit">poprawiony</span>`,
+    check: `<span class="badge b-check" title="skok o więcej niż 3 punkty">sprawdź</span>`,
+  }[e.flag] || "";
+}
+
+function render() {
+  const d = state.data, m = d.match, cols = d.colours || {};
+  $("title").textContent = `${m.home} – ${m.guest}  ${d.final?.home ?? "?"}:${d.final?.guest ?? "?"}`;
+  const sw = (s) => cols[s] ? `<span class="sw" style="background:rgb(${cols[s].rgb.join(",")})"></span> ${esc(cols[s].name)}` : "";
+  $("sub").innerHTML = `${esc(m.home)} ${sw("home")} · ${esc(m.guest)} ${sw("guest")}`;
+  $("homeLbl").textContent = m.home; $("guestLbl").textContent = m.guest;
+  $("calLink").href = `/calibrate/${encodeURIComponent(stem)}`;
+  if (!state.rosterTouched) {
+    $("rosterHome").value = rosterText((m.roster || {}).home);
+    $("rosterGuest").value = rosterText((m.roster || {}).guest);
+  }
+  $("yt").value = d.youtube || "";
+  const evs = d.events;
+  const baskets = evs.filter((e) => e.points > 0);
+  const withNum = baskets.filter((e) => e.shot && e.shot.number != null && e.shot.number_src !== "read_low").length;
+  $("counts").textContent = `${baskets.length} koszy · numer znany w ${withNum} · do sprawdzenia ${evs.filter(needsCheck).length}`;
+  const only = $("fCheck").checked;
+  $("rows").innerHTML = evs.filter((e) => !only || needsCheck(e)).map((e) => {
+    if (e.flag === "correction") {
+      return `<tr class="corr" data-key="${e.key}"><td>${esc(e.timestamp)}</td><td>${e.home ?? "?"}:${e.guest ?? "?"}</td>
+        <td colspan="7">korekta na tablicy: ${esc(e.team_name)} ${e.points} pkt${e.unmatched ? ` (${e.unmatched} pkt bez pasującego kosza — sprawdź)` : " — uwzględniona w koszach powyżej"}</td></tr>`;
+    }
+    const s = e.shot || {};
+    const off = e.points <= 0;
+    const src = SRC[s.number_src] || ["–", ""];
+    const flags = [s.colour_ok === false && !off ? `<span class="badge b-bad" title="kolor koszulki nie zgadza się z tablicą">kolor?</span>` : "",
+                   s.number_check ? `<span class="badge b-check" title="odczyty numeru różnią się">różne</span>` : ""].join(" ");
+    const val = state.dirty[e.key] !== undefined ? (state.dirty[e.key] ?? "") : (s.number ?? "");
+    const ed = e.edit || {};
+    const ptsSel = `<select class="pts" title="punkty">${[1, 2, 3].map((p) => `<option ${p === (e.points || ed.points) ? "selected" : ""}>${p}</option>`).join("")}</select>`;
+    return `<tr data-key="${e.key}" class="${off ? "off" : ""} ${state.dirty[e.key] !== undefined ? "changed" : ""}">
+      <td>${esc(e.timestamp)}</td><td>${e.home ?? "?"}:${e.guest ?? "?"}</td>
+      <td>${cols[e.team] ? `<span class="sw" style="background:rgb(${cols[e.team].rgb.join(",")})"></span>` : ""} ${esc(e.team_name)}</td>
+      <td>${off ? "0" : "+" + e.points}</td>
+      <td>${s.crop ? `<img src="${img(s.crop)}" data-zoom="${img(s.grid || s.crop)}" alt="">` : `<span class="muted">brak</span>`}</td>
+      <td class="num">${off ? "" : `<input value="${esc(val)}" inputmode="numeric" maxlength="2">`}</td>
+      <td>${off ? "" : `<span class="badge ${src[1]}">${src[0]}</span>`} ${flags}
+        ${ed.number !== undefined ? `<button class="undo" title="cofnij poprawkę numeru">×</button>` : ""}</td>
+      <td>${esc(e.player)}</td>
+      <td class="act">${flagBadge(e)}<br>
+        ${ed.cancel ? `<button class="act-restore">przywróć</button>`
+          : `${off ? "" : `<button class="act-cancel" title="tego kosza nie było">anuluj</button>`}
+             <button class="act-team" title="punkty dla drugiej drużyny">↔ drużyna</button> ${off ? "" : ptsSel}`}
+        ${(ed.team || ed.points) ? `<button class="act-reset" title="cofnij zmianę drużyny/punktów">cofnij</button>` : ""}</td></tr>`;
+  }).join("");
+  $("saveEdits").disabled = !Object.keys(state.dirty).length;
+}
+
+async function load() {
+  const r = await fetch(`/api/scoring/${encodeURIComponent(stem)}`);
+  if (!r.ok) { setStatus(`Brak wyników dla ${stem} (${r.status})`, "err"); return; }
+  state.data = await r.json(); render();
+}
+
+async function post(url, body, okMsg) {
+  setStatus("Zapisuję…");
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) { setStatus(`Błąd: ${(await r.json().catch(() => ({}))).detail || r.status}`, "err"); return false; }
+  state.data = await r.json(); render(); setStatus(okMsg, "ok"); return true;
+}
+
+$("rows").addEventListener("input", (ev) => {
+  const tr = ev.target.closest("tr"); if (!tr || ev.target.tagName !== "INPUT") return;
+  const v = ev.target.value.replace(/\D/g, "").slice(0, 2); ev.target.value = v;
+  state.dirty[tr.dataset.key] = v === "" ? null : +v;
+  tr.classList.add("changed"); $("saveEdits").disabled = false;
+});
+$("rows").addEventListener("click", async (ev) => {
+  const z = ev.target.dataset && ev.target.dataset.zoom;
+  if (z) { $("zoom").querySelector("img").src = z; $("zoom").style.display = "flex"; return; }
+  const tr = ev.target.closest("tr"); if (!tr || ev.target.tagName !== "BUTTON") return;
+  const key = tr.dataset.key, e = state.data.events.find((x) => x.key === key);
+  const send = (edit, msg) => post(`/api/scoring/${encodeURIComponent(stem)}/edits`, { edits: { [key]: edit } }, msg);
+  const cl = ev.target.classList;
+  if (cl.contains("undo")) { delete state.dirty[key]; await send({ clear: ["number"] }, "Poprawka numeru cofnięta."); }
+  else if (cl.contains("act-cancel")) await send({ cancel: true }, "Kosz anulowany.");
+  else if (cl.contains("act-restore")) await send({ cancel: false }, "Kosz przywrócony.");
+  else if (cl.contains("act-team")) await send({ team: e.team === "home" ? "guest" : "home" }, "Drużyna zmieniona.");
+  else if (cl.contains("act-reset")) await send({ clear: ["team", "points"] }, "Zmiana cofnięta.");
+});
+$("rows").addEventListener("change", async (ev) => {
+  if (!ev.target.classList.contains("pts")) return;
+  const key = ev.target.closest("tr").dataset.key;
+  await post(`/api/scoring/${encodeURIComponent(stem)}/edits`, { edits: { [key]: { points: +ev.target.value } } }, "Punkty zmienione.");
+});
+$("zoom").onclick = () => { $("zoom").style.display = "none"; };
+$("fCheck").onchange = render;
+$("saveEdits").onclick = async () => {
+  const edits = Object.fromEntries(Object.entries(state.dirty).map(([k, n]) => [k, { number: n }]));
+  if (await post(`/api/scoring/${encodeURIComponent(stem)}/edits`, { edits }, "Numery zapisane, opis YouTube odświeżony.")) state.dirty = {};
+  render();
+};
+["rosterHome", "rosterGuest"].forEach((id) => $(id).addEventListener("input", () => { state.rosterTouched = true; }));
+$("saveRoster").onclick = async () => {
+  if (await post(`/api/scoring/${encodeURIComponent(stem)}/roster`,
+                 { home: $("rosterHome").value, guest: $("rosterGuest").value }, "Skład zapisany.")) state.rosterTouched = false;
+  render();
+};
+$("copyYt").onclick = async () => { await navigator.clipboard.writeText($("yt").value); setStatus("Skopiowano.", "ok"); };
+load();
+</script>
+</body>
+</html>

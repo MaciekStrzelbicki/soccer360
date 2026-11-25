@@ -63,8 +63,27 @@ soccer360 -c configs/basketball.yaml score ~/Desktop/game.mp4 --home "Tygrysy" -
 
 The left scoreboard score is the home team; use `--home-side right` (or the
 dashboard select) if the board is the other way round. Rows flagged `check`
-(jump > 3 points) or `correction` (score went down) in `scoring.csv` are
-worth a look; corrections are left out of `youtube.txt`.
+(jump > 3 points) in `scoring.csv` are worth a look.
+
+**Scorer's table mistakes** are undone automatically when the board itself is
+corrected later:
+
+- points taken back (`+2`, later `-2`, within 3 min) → that basket is
+  `cancelled` (kept in `scoring.csv`, left out of `youtube.txt`);
+- wrong value (`+3`, later `-1`) → a 2-pointer at the original time
+  (`corrected`, `board_points` = what the board first showed);
+- wrong team (points removed from one team and given to the other within
+  20 s, also in one step) → the basket goes to the right team at the time
+  it was first entered (`moved`, `entered_t_sec` = when it was moved), so
+  shooter search looks at the right moment;
+- points shown for one board state only with no transfer → treated as a
+  misread and ignored.
+
+Running scores are recounted after these fixes. What the automation cannot
+untangle (e.g. a correction minutes later, a basket that never reached the
+board) is fixed on the review page `/scoring/<video>`: *anuluj* (no basket),
+*↔ drużyna*, points 1/2/3, all undoable; stored in `edits.json` next to the
+results, so re-runs keep them.
 
 ### Shooter and shirt colours (stage 2)
 
@@ -100,3 +119,33 @@ Accuracy on the first game (66 baskets): the shooter's shirt matched the
 board in 56/66 baskets without the hint; most crops show the right player,
 free-throw shooters the detector missed get a wider crop around the LLM's
 point. Treat the shooter as a strong suggestion, not a fact.
+
+### Jersey numbers, roster and corrections (stage 3)
+
+With `scoring.numbers.enabled` the shooter is followed through the player
+detections ±2 s around the shot (crossing players are not followed: box
+size jumps and crops in the opponent's shirt colour are dropped) and up to 8
+crops go on one grid image per basket (`shots/<t>_n.jpg`). `gpt-5-mini`
+reads the number, 6 baskets per request.
+
+Review page: dashboard `/scoring/<video>` (linked from the calibration page)
+— every basket with the shooter crop (click: the grid), number field, source
+(`odczyt` automatic, `poprawka` your correction, `niepewny` low-confidence
+read shown only as a hint) and flags (`kolor?` shirt vs board, `różne` the two
+automatic reads disagree). Saved numbers win over automatic ones and
+regenerate `youtube.txt`. The roster (one `number name` per line per team)
+adds names. `youtube.txt` then has `– #7 Kowalski` on every basket with a
+known number and a `Strzelcy:` summary per team.
+
+### LLM cost per game (first game; scoreboard not measured, estimate)
+
+| Step | Model (default) | Requests | Cost |
+|---|---|---|---|
+| Scoreboard | `gpt-5` | ~12 | ~$0.5 (est.) |
+| Shooters | `gpt-5-mini` | ~76 | ~$0.5 (`gpt-5`: ~$3.3) |
+| Numbers | `gpt-5-mini`, low effort | ~11 | ~$0.02 |
+
+Models are set per step: `scoring.llm`, `scoring.shooters.llm`,
+`scoring.numbers.llm` (`model`, `reasoning_effort`). When the API account
+runs out of credits the remaining requests stop at once; rerun
+`score --shots-only` later — everything already answered is cached.

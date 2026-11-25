@@ -192,6 +192,8 @@ scoring:
     enabled: true
     window_sec: 15        # video before each board update searched for the shot
     shot_lead_sec: 3      # timestamp = shot minus this
+  numbers:                # stage 3: shooter's jersey number (needs shooters)
+    enabled: true
 
 dashboard:
   db_path: ./data/state/dashboard.db

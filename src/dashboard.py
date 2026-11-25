@@ -1417,6 +1417,153 @@ def create_app(config: dict | None = None) -> FastAPI:
                 "shots": len(shots),
                 "colour_ok": sum(1 for s in shots if s.get("colour_ok"))}
 
+    # ------------------------------------------------------------------
+    # Scoring review: shooters, jersey numbers, roster (stage 3)
+    # ------------------------------------------------------------------
+
+    @app.get("/scoring/{stem}", response_class=HTMLResponse)
+    async def scoring_page(stem: str):
+        f = STATIC_DIR / "scoring.html"
+        if not f.exists():
+            return HTMLResponse("<h1>Soccer360</h1><p>static/scoring.html not found</p>")
+        return HTMLResponse(f.read_text())
+
+    def _scoring_match(stem: str, d: Path) -> tuple[dict, bool]:
+        """Match info (+roster) and whether it lives in a calibration file."""
+        try:
+            vp = _cal_video(stem)
+            m = cal_mod.load_match(config, vp)
+            if m:
+                return m, True
+            return {}, True
+        except HTTPException:
+            doc = json.loads((d / "scoring.json").read_text())
+            return doc.get("match") or {}, False
+
+    def _scoring_view(stem: str) -> dict:
+        d = _scoring_dir(stem)
+        if d is None:
+            raise HTTPException(404, "Not scored yet")
+        from .scoring import load_edits, match_info, player_label
+        doc = json.loads((d / "scoring.json").read_text())
+        edits = load_edits(d)
+        match = match_info({"match": _scoring_match(stem, d)[0] or doc.get("match")})
+        evs = []
+        for e in doc.get("events") or []:
+            key = f"{float(e['board_t']):.2f}"
+            evs.append({**e, "key": key, "edit": edits.get(key) or {},
+                        "player": player_label(e, match, uncertain=True)})
+        yt = (d / "youtube.txt").read_text() if (d / "youtube.txt").exists() else ""
+        return {"stem": stem, "match": match, "colours": doc.get("colours"),
+                "final": doc.get("final"), "events": evs, "youtube": yt}
+
+    def _regenerate(stem: str, d: Path) -> None:
+        from .scoring import regenerate_outputs
+        m, _ = _scoring_match(stem, d)
+        regenerate_outputs(config, d, {"match": m} if m else None)
+
+    @app.get("/api/scoring/{stem}")
+    def scoring_get(stem: str):
+        return _scoring_view(stem)
+
+    @app.get("/api/scoring/{stem}/file/{name}")
+    def scoring_file(stem: str, name: str):
+        import re as _re
+        d = _scoring_dir(stem)
+        if d is None or not _re.fullmatch(r"[\w.-]+\.jpg", name):
+            raise HTTPException(404, "Not found")
+        f = d / "shots" / name
+        if not f.is_file():
+            raise HTTPException(404, "Not found")
+        from fastapi.responses import FileResponse
+        return FileResponse(f, media_type="image/jpeg")
+
+    @app.post("/api/scoring/{stem}/edits")
+    def scoring_edits(stem: str, payload: dict):
+        """Manual fixes per basket (``edits.json``)::
+
+            {"edits": {key: {"number": 7 | null, "cancel": true,
+                             "team": "home" | "guest", "points": 1..3,
+                             "clear": ["number", ...]} | null}}
+
+        Fields merge into the basket's existing edit; ``clear`` drops fields,
+        ``null`` drops the whole edit.
+        """
+        d = _scoring_dir(stem)
+        if d is None:
+            raise HTTPException(404, "Not scored yet")
+        path = d / "edits.json"
+        try:
+            doc = json.loads(path.read_text()) if path.is_file() else {}
+        except json.JSONDecodeError:
+            doc = {}
+        edits = doc.setdefault("events", {})
+        for k, v in ((payload or {}).get("edits") or {}).items():
+            k = str(k)
+            if v is None:
+                edits.pop(k, None)
+                continue
+            if not isinstance(v, dict):
+                raise HTTPException(400, f"Bad edit for {k}")
+            cur = dict(edits.get(k) or {})
+            for f in v.get("clear") or []:
+                cur.pop(str(f), None)
+            if "number" in v:
+                n = v["number"]
+                if n is not None:
+                    try:
+                        n = int(n)
+                    except (TypeError, ValueError):
+                        raise HTTPException(400, f"Bad number: {n}")
+                    if not 0 <= n <= 99:
+                        raise HTTPException(400, f"Bad number: {n}")
+                cur["number"] = n
+            if "cancel" in v:
+                if v["cancel"]:
+                    cur["cancel"] = True
+                else:
+                    cur.pop("cancel", None)
+            if "team" in v:
+                if v["team"] not in ("home", "guest"):
+                    raise HTTPException(400, f"Bad team: {v['team']}")
+                cur["team"] = v["team"]
+            if "points" in v:
+                if v["points"] not in (1, 2, 3):
+                    raise HTTPException(400, f"Bad points: {v['points']}")
+                cur["points"] = v["points"]
+            if cur:
+                edits[k] = cur
+            else:
+                edits.pop(k, None)
+        path.write_text(json.dumps(doc, indent=1))
+        _regenerate(stem, d)
+        return _scoring_view(stem)
+
+    @app.post("/api/scoring/{stem}/roster")
+    def scoring_roster(stem: str, payload: dict):
+        """``{"home": "7 Kowalski\n10 Nowak", "guest": "..."}``."""
+        import re as _re
+        d = _scoring_dir(stem)
+        if d is None:
+            raise HTTPException(404, "Not scored yet")
+        roster = {}
+        for side in ("home", "guest"):
+            team = {}
+            for line in str((payload or {}).get(side) or "").splitlines():
+                mm = _re.match(r"\s*#?(\d{1,2})\b[\s.:-]*(.*)$", line)
+                if mm:
+                    team[str(int(mm.group(1)))] = mm.group(2).strip()
+            roster[side] = team
+        m, in_cal = _scoring_match(stem, d)
+        if in_cal:
+            cal_mod.save_match(config, _cal_video(stem), {**m, "roster": roster})
+        else:
+            doc = json.loads((d / "scoring.json").read_text())
+            doc.setdefault("match", {})["roster"] = cal_mod.clean_roster(roster)
+            (d / "scoring.json").write_text(json.dumps(doc, indent=2, ensure_ascii=False))
+        _regenerate(stem, d)
+        return _scoring_view(stem)
+
     @app.post("/api/calibration/{stem}/match")
     def calibration_match_save(stem: str, payload: dict):
         vp = _cal_video(stem)
