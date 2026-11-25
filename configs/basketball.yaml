@@ -188,6 +188,10 @@ scoring:
   lead_sec: 6.0           # timestamps = board update minus this (shows the play)
   max_points: 3           # bigger jumps are flagged "check"
   chapters: true          # period chapters at the top of youtube.txt
+  shooters:               # stage 2: shot moment, shooter, team shirt colours
+    enabled: true
+    window_sec: 15        # video before each board update searched for the shot
+    shot_lead_sec: 3      # timestamp = shot minus this
 
 dashboard:
   db_path: ./data/state/dashboard.db

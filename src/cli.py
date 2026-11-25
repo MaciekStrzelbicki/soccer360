@@ -244,8 +244,12 @@ def calibrate(ctx: click.Context, video_path: str, llm: bool | None, port: int):
               help="Output dir (default: <paths.processed>/<video stem>).")
 @click.option("--text-only", is_flag=True,
               help="Only rewrite csv/youtube.txt from an existing scoring.json.")
+@click.option("--shots-only", is_flag=True,
+              help="Only find shooters (stage 2) for an existing scoring.json; "
+                   "resumes unfinished LLM reads.")
 @click.pass_context
-def score(ctx: click.Context, video_path: str, home, guest, home_side, out_dir, text_only):
+def score(ctx: click.Context, video_path: str, home, guest, home_side, out_dir, text_only,
+          shots_only):
     """Read the scoreboard: scoring.json, scoring.csv and youtube.txt.
 
     Uses the venue calibration of the video (scoreboard position, camera
@@ -254,7 +258,7 @@ def score(ctx: click.Context, video_path: str, home, guest, home_side, out_dir, 
     import copy
 
     from .calibration import load_match, resolve_calibration, save_match
-    from .scoring import regenerate_outputs, run_scoring
+    from .scoring import regenerate_outputs, run_scoring, run_shots_only
     from .utils import probe_video
 
     cfg = copy.deepcopy(ctx.obj["config"])
@@ -282,7 +286,11 @@ def score(ctx: click.Context, video_path: str, home, guest, home_side, out_dir, 
             cal = resolve_calibration(cfg, video_path, meta.duration)
         if match:
             cal["match"] = match
-        paths = run_scoring(cfg, video_path, cal, meta.width, meta.height, out)
+        if shots_only:
+            paths = run_shots_only(cfg, video_path, cal, meta.width, meta.height, meta.fps, out)
+        else:
+            paths = run_scoring(cfg, video_path, cal, meta.width, meta.height, out,
+                                fps=meta.fps)
         if not paths:
             raise click.ClickException("No scoreboard calibrated for this video")
     click.echo(Path(paths["youtube"]).read_text())

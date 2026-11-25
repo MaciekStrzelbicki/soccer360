@@ -115,12 +115,15 @@ class Exporter:
             artifacts = ["camera_path.json"]
         # Venue calibration + scoring (present only when enabled)
         artifacts += ["calibration.json", "scoring.json", "scoring.csv",
-                      "youtube.txt", "scoreboard_reads.json"]
+                      "youtube.txt", "scoreboard_reads.json", "shots.json"]
         for name in artifacts:
             src = work_dir / name
             if src.exists():
                 shutil.copy2(str(src), str(output_dir / name))
                 logger.info("Preserved artifact: %s", name)
+        if (work_dir / "shots").is_dir():  # shooter crops (scoring stage 2)
+            shutil.copytree(work_dir / "shots", output_dir / "shots", dirs_exist_ok=True)
+            logger.info("Preserved artifact: shots/")
 
         # Save ffprobe metadata
         probe_data = {

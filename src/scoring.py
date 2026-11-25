@@ -38,6 +38,7 @@ import cv2
 import numpy as np
 
 from .calibration import _jpeg_b64, pitch_to_y, shift_at, yaw_to_x
+from .shots import apply_shots, find_shots, shots_config
 
 logger = logging.getLogger("soccer360.scoring")
 
@@ -532,7 +533,7 @@ def youtube_text(result: dict, match: dict, lead_sec: float = 6.0,
     if pts:
         lines.append("Punkty:")
         for e in pts:
-            t = e["board_t"] - lead_sec
+            t = e.get("t", e["board_t"] - lead_sec)
             lines.append(f"{fmt_ts(t)} {_score(e)} {names[e['team']]} +{e['points']}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -541,8 +542,12 @@ def youtube_text(result: dict, match: dict, lead_sec: float = 6.0,
 def write_outputs(out_dir: Path, result: dict, match: dict, sc_cfg: dict) -> dict:
     out_dir = Path(out_dir)
     lead = float(sc_cfg.get("lead_sec", 6.0))
+    shot_lead = float(shots_config(sc_cfg)["shot_lead_sec"])
     for e in result["events"]:
-        e["t"] = round(max(0.0, e["board_t"] - lead), 2)
+        if e.get("shot_t") is not None:  # stage 2 found the shot itself
+            e["t"] = round(max(0.0, e["shot_t"] - shot_lead), 2)
+        else:
+            e["t"] = round(max(0.0, e["board_t"] - lead), 2)
         e["timestamp"] = fmt_ts(e["t"])
         e["team_name"] = match[e["team"]]
     doc = {"match": match, "lead_sec": lead, **result}
@@ -555,11 +560,17 @@ def write_outputs(out_dir: Path, result: dict, match: dict, sc_cfg: dict) -> dic
     with paths["csv"].open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["timestamp", "t_sec", "board_t_sec", "period", "team",
-                    "team_name", "points", "home", "guest", "flag"])
+                    "team_name", "points", "home", "guest", "flag", "shot_t_sec",
+                    "shooter_colour", "colour_ok", "number_guess", "shot_crop"])
         for e in result["events"]:
+            sh = e.get("shot") or {}
+            ok = sh.get("colour_ok")
             w.writerow([e["timestamp"], e["t"], e["board_t"], e.get("period"),
                         e["team"], e["team_name"], e["points"], e.get("home"),
-                        e.get("guest"), e.get("flag", "")])
+                        e.get("guest"), e.get("flag", ""), sh.get("t", ""),
+                        sh.get("colour", ""), "" if ok is None else int(ok),
+                        "" if sh.get("number_guess") is None else sh["number_guess"],
+                        sh.get("crop", "")])
     paths["youtube"].write_text(
         youtube_text(result, match, lead, bool(sc_cfg.get("chapters", True)))
     )
@@ -572,9 +583,14 @@ def write_outputs(out_dir: Path, result: dict, match: dict, sc_cfg: dict) -> dic
 
 def run_scoring(
     config: dict, video_path: str | Path, cal: dict, width: int, height: int,
-    out_dir: str | Path, reader: ReadFn | None = None,
+    out_dir: str | Path, reader: ReadFn | None = None, *, fps: float = 30.0,
+    detections_path: str | Path | None = None, shot_reader=None,
 ) -> dict | None:
-    """Full stage-1 scoring for one video. Returns output paths or None."""
+    """Scoring for one video (board + shooters). Returns output paths or None.
+
+    Shooters (stage 2, ``scoring.shooters.enabled``) need player detections:
+    ``detections_path`` or ``<out_dir>/detections.jsonl``.
+    """
     sc = scoring_config(config)
     sb = cal.get("scoreboard") if cal else None
     if not sb:
@@ -613,6 +629,17 @@ def run_scoring(
     finally:
         cache_path.write_text(json.dumps({"scoreboard": sb, "reads": cache}, indent=1))
     result = derive_events(timeline, match["home_side"], int(sc["max_points"]))
+    if shots_config(sc)["enabled"]:
+        det = Path(detections_path) if detections_path else out_dir / "detections.jsonl"
+        if det.is_file():
+            try:
+                doc = find_shots(config, sc, video_path, cal, result["events"],
+                                 width, height, fps, det, out_dir, reader=shot_reader)
+                apply_shots(result, doc)
+            except Exception:
+                logger.exception("Shooters failed; scores without shots")
+        else:
+            logger.warning("Shooters skipped: no detections at %s", det)
     paths = write_outputs(out_dir, result, match, sc)
     logger.info(
         "Scoring: %d events, final %s %s:%s %s -> %s",
@@ -620,6 +647,20 @@ def run_scoring(
         result["final"].get("guest"), match["guest"], paths["youtube"],
     )
     return paths
+
+
+def run_shots_only(config: dict, video_path: str | Path, cal: dict, width: int,
+                   height: int, fps: float, out_dir: str | Path,
+                   shot_reader=None) -> dict:
+    """Stage 2 on top of an existing ``scoring.json`` (no scoreboard pass)."""
+    out_dir = Path(out_dir)
+    sc = scoring_config(config)
+    doc = json.loads((out_dir / "scoring.json").read_text())
+    events = [{k: e[k] for k in ("board_t", "team", "points", "period") if k in e}
+              for e in doc["events"]]
+    find_shots(config, sc, video_path, cal, events, width, height, fps,
+               out_dir / "detections.jsonl", out_dir, reader=shot_reader)
+    return regenerate_outputs(config, out_dir, cal)
 
 
 def regenerate_outputs(config: dict, out_dir: str | Path, cal: dict | None) -> dict:
@@ -637,4 +678,10 @@ def regenerate_outputs(config: dict, out_dir: str | Path, cal: dict | None) -> d
                                int(scoring_config(config)["max_points"]))
     else:
         result = {k: doc[k] for k in ("start", "events", "periods", "final")}
+    for e in result["events"]:  # re-derived below (mapping depends on sides)
+        e.pop("shot", None)
+        e.pop("shot_t", None)
+    shots = out_dir / "shots.json"
+    if shots.is_file():
+        apply_shots(result, json.loads(shots.read_text()))
     return write_outputs(out_dir, result, match, scoring_config(config))

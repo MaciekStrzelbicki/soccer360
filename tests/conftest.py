@@ -142,7 +142,7 @@ def test_config() -> dict:
                 "dir": "calibrations",  # tests that enable it override with tmp_path
                 "llm": {"enabled": False},
             },
-            "scoring": {"enabled": False},
+            "scoring": {"enabled": False, "shooters": {"enabled": False}},
             "highlights": {
                 "enabled": True,
                 "speed_percentile": 95,

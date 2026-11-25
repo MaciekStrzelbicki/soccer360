@@ -65,3 +65,38 @@ The left scoreboard score is the home team; use `--home-side right` (or the
 dashboard select) if the board is the other way round. Rows flagged `check`
 (jump > 3 points) or `correction` (score went down) in `scoring.csv` are
 worth a look; corrections are left out of `youtube.txt`.
+
+### Shooter and shirt colours (stage 2)
+
+With `scoring.shooters.enabled` (on in `basketball.yaml`; needs two calibrated
+hoops and `detections.jsonl`) every basket is also located in the video:
+
+1. The player detections before each board update tell which basket the play
+   is at; one vote over all baskets fixes which basket each team attacks per
+   half.
+2. `window_sec` (15 s) before the update, one full-resolution frame per second
+   around that basket, with lettered player boxes.
+3. Shirt colours of all players in those frames are clustered: the two biggest
+   clusters are the teams (referees fall into the third).
+4. The vision LLM names the release frame, the shooter and his team colour
+   (one request per basket). Which colour is home/guest is voted against the
+   board; baskets where the shooter's colour disagrees are asked again with
+   the scoring team's colour as a hint.
+
+Results: `shots.json` (LLM answers + colours, cached — reruns cost nothing),
+`shots/<board time>.jpg` crops of every shooter (for jersey numbers later),
+and in `scoring.csv` the columns `shot_t_sec`, `shooter_colour`, `colour_ok`,
+`number_guess`, `shot_crop`. YouTube timestamps then use the shot itself
+minus `shot_lead_sec` (3 s) instead of the board update minus 6 s. The
+dashboard *Match* section shows the team colours.
+
+```bash
+# stage 2 only, on an already scored video (also resumes reads that failed,
+# e.g. when the API ran out of credits)
+soccer360 -c configs/basketball.yaml score ~/Desktop/game.mp4 --shots-only
+```
+
+Accuracy on the first game (66 baskets): the shooter's shirt matched the
+board in 56/66 baskets without the hint; most crops show the right player,
+free-throw shooters the detector missed get a wider crop around the LLM's
+point. Treat the shooter as a strong suggestion, not a fact.

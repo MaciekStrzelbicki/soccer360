@@ -1409,8 +1409,13 @@ def create_app(config: dict | None = None) -> FastAPI:
             yt = (d / "youtube.txt").read_text() if (d / "youtube.txt").exists() else ""
         except (OSError, json.JSONDecodeError):
             return None
-        return {"dir": str(d), "events": len(doc.get("events") or []),
-                "final": doc.get("final") or {}, "youtube": yt}
+        evs = doc.get("events") or []
+        shots = [e["shot"] for e in evs if e.get("shot")]
+        return {"dir": str(d), "events": len(evs),
+                "final": doc.get("final") or {}, "youtube": yt,
+                "colours": doc.get("colours"),
+                "shots": len(shots),
+                "colour_ok": sum(1 for s in shots if s.get("colour_ok"))}
 
     @app.post("/api/calibration/{stem}/match")
     def calibration_match_save(stem: str, payload: dict):

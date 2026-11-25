@@ -351,6 +351,15 @@ scoring:                            # scores from the scoreboard (needs calibrat
   lead_sec: 6.0                     # timestamps = board update minus this
   max_points: 3                     # bigger jumps are flagged "check"
   chapters: true                    # period chapters in youtube.txt
+  shooters:                         # shot moment + shooter + shirt colours (needs detections, 2 hoops)
+    enabled: false
+    window_sec: 15                  # video before each board update searched for the shot
+    step_sec: 1.0                   # one frame per step sent to the LLM
+    shot_lead_sec: 3                # timestamp = shot minus this
+    min_conf: 0.25                  # player detections boxed for the LLM (low: catch free-throw shooters)
+    workers: 4                      # parallel LLM requests
+    verify: true                    # re-ask events whose shirt colour disagrees with the board
+    max_w: 1100                     # px width per frame sent to the LLM
 
 dashboard:
   enabled: true

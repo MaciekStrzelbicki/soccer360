@@ -152,7 +152,8 @@ class Pipeline:
         logger.info("--- Phase 6.5: Scoring (scoreboard) ---")
         try:
             with self._tracked_phase(timer, job_id, "scoring"):
-                run_scoring(self.config, input_path, cal, meta.width, meta.height, work_dir)
+                run_scoring(self.config, input_path, cal, meta.width, meta.height, work_dir,
+                            fps=meta.fps)
         except Exception:
             logger.exception("Scoring failed; continuing without scores")
 

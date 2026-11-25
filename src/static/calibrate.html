@@ -93,6 +93,7 @@
       <button id="saveTeams">Save teams</button>
     </div>
     <p class="muted" id="scoringInfo" style="margin-top:4px">Scores are read from the scoreboard during processing (scoring.enabled).</p>
+    <p class="muted" id="shotInfo" style="margin-top:2px;display:none"></p>
     <textarea id="ytText" readonly style="display:none;width:100%;height:180px;margin-top:6px;background:#0d1722;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px;font:12px ui-monospace,monospace"></textarea>
     <button id="copyYt" style="display:none;margin-top:4px">Copy YouTube text</button>
 
@@ -194,6 +195,10 @@ async function openVideo(stem) {
   refreshPreview();
 }
 
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}
+
 function showMatch() {
   const m = state.data.match || {};
   $("teamHome").value = m.home || ""; $("teamGuest").value = m.guest || "";
@@ -204,6 +209,12 @@ function showMatch() {
   $("scoringInfo").textContent = sc
     ? `Scoring: ${sc.events} score changes, final ${sc.final.home ?? "?"}:${sc.final.guest ?? "?"} (${sc.dir})`
     : "Scores are read from the scoreboard during processing (scoring.enabled).";
+  const cols = sc && sc.colours;
+  const sw = (c) => `<span style="display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:-1px;border:1px solid #fff4;background:rgb(${c.rgb.join(",")})"></span>`;
+  $("shotInfo").style.display = sc && (cols || sc.shots) ? "" : "none";
+  $("shotInfo").innerHTML = !sc ? "" :
+    (cols ? `Shirts: ${esc($("teamHome").value || "Home")} ${sw(cols.home)} ${esc(cols.home.name)} · ${esc($("teamGuest").value || "Guest")} ${sw(cols.guest)} ${esc(cols.guest.name)}. ` : "")
+    + (sc.shots ? `Shooter found for ${sc.shots}/${sc.events} baskets, shirt matches the board in ${sc.colour_ok}.` : "");
 }
 
 function useCal(c, label) {
