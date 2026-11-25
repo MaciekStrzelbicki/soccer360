@@ -43,7 +43,11 @@ score from the venue scoreboard (needs a calibrated scoreboard and
 `OPENAI_API_KEY`) and writes to `data/processed/<match>/`:
 
 - `scoring.json` / `scoring.csv` — every score change: time, team, points, score
-- `youtube.txt` — final score, period chapters, list of baskets with timestamps
+- `youtube.txt` — ready to paste into the YouTube description: final score,
+  points per period, shirt colours, then ONE chronological list (period
+  markers + every basket with the shooter's number) that YouTube turns into
+  chapters — it starts at 0:00 and entries less than 10 s apart share a line
+  (YouTube's minimum chapter length; e.g. two free throws)
 
 How it works: scoreboard crops from every keyframe (~1/s); board changes are
 found locally (LED pixels, the running clock ignored); each constant board
@@ -52,7 +56,10 @@ game). Timestamps are the board update minus `scoring.lead_sec` (6 s), so a
 click shows the play.
 
 Team names: dashboard `/calibrate/<video>` → *Match (scoring)*, or the CLI.
-Changing them after processing only rewrites the text files.
+Set them **before processing**: upload to staging, click *Drużyny* next to
+the file, enter the names, then *Send To Ingest* (names are kept per video
+name and follow the file into ingest). Changing them after processing only
+rewrites the text files.
 
 ```bash
 # score an already processed video (reuses data/processed/<stem>/calibration.json)

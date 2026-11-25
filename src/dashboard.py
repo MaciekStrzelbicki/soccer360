@@ -1279,6 +1279,13 @@ def create_app(config: dict | None = None) -> FastAPI:
             raise HTTPException(404, "Unknown video; run `soccer360 calibrate VIDEO` first")
         vp = Path(entry["video_path"])
         if not vp.is_file():
+            # registered from staging, then moved to ingest (same name)
+            for md in _cal_media_dirs():
+                import glob as _glob
+                for cand in (md.glob(f"{_glob.escape(stem)}.*") if md.is_dir() else []):
+                    if cand.suffix.lower() in _VIDEO_EXT and cand.is_file():
+                        cal_mod.register_video(config, cand)
+                        return cand
             raise HTTPException(404, f"Video file missing: {vp}")
         return vp
 

@@ -134,7 +134,8 @@ class TestApply:
         doc = json.loads((tmp_path / "scoring.json").read_text())
         assert doc["events"][1]["t"] == 13.0          # shot - 3 s
         assert doc["events"][0]["t"] == 4.0           # board - 6 s (no shot)
-        assert "0:13 " in (tmp_path / "youtube.txt").read_text()
+        # 13 s is < 10 s after the first entry (4 s): one chapter at 0:00
+        assert "0:00 ?:? Gospodarze +2 | ?:? Goście +2" in (tmp_path / "youtube.txt").read_text()
         header = (tmp_path / "scoring.csv").read_text().splitlines()[0]
         assert "shooter_colour" in header
 

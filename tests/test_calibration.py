@@ -495,3 +495,25 @@ def test_save_manual_keeps_frame_time(tmp_path):
     cal.save_manual(c, v, {"scoreboard": {"yaw": 1, "pitch": 1, "width_deg": 5, "height_deg": 2},
                            "frame_time_sec": 123.0})
     assert cal.load_manual(c, v)["frame_time_sec"] == 123.0
+
+
+def test_teams_set_in_staging_survive_move_to_ingest(tmp_path, synthetic_video):
+    """Team names entered before processing (file in staging) still apply
+    after the file is sent to ingest."""
+    from fastapi.testclient import TestClient
+    from src.dashboard import create_app
+
+    staging, ingest = tmp_path / "stagging", tmp_path / "ingest"
+    staging.mkdir()
+    ingest.mkdir()
+    (staging / "g.mp4").write_bytes(Path(synthetic_video).read_bytes())
+    config = {"paths": {"ingest": str(ingest), "stagging": str(staging)},
+              "dashboard": {"db_path": str(tmp_path / "d.db")},
+              "calibration": {"enabled": True, "dir": str(tmp_path / "cal")}}
+    c = TestClient(create_app(config))
+    r = c.post("/api/calibration/g/match", json={"home": "Tygrysy", "guest": "Lwy"})
+    assert r.status_code == 200
+    (staging / "g.mp4").rename(ingest / "g.mp4")
+    r = c.get("/api/calibration/g")
+    assert r.status_code == 200 and r.json()["match"]["home"] == "Tygrysy"
+    assert cal.load_match(config, ingest / "g.mp4")["guest"] == "Lwy"

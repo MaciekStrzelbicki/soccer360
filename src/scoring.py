@@ -645,41 +645,72 @@ def scorers_lines(pts: list[dict], match: dict, names: dict) -> list[str]:
     return (["Strzelcy:"] + out + [""]) if out else []
 
 
+def period_scores(result: dict) -> list[tuple[int, int | None, int | None]]:
+    """Points per period ``[(period, home, guest)]`` from the running score."""
+    end: dict[int, tuple] = {}
+    for e in result.get("events") or []:
+        if e.get("period") is not None:
+            end[e["period"]] = (e.get("home"), e.get("guest"))
+    out, prev = [], ((result.get("start") or {}).get("home") or 0,
+                     (result.get("start") or {}).get("guest") or 0)
+    for p in sorted(end):
+        h, g = end[p]
+        out.append((p, None if h is None else h - prev[0], None if g is None else g - prev[1]))
+        prev = (h if h is not None else prev[0], g if g is not None else prev[1])
+    return out
+
+
 def youtube_text(result: dict, match: dict, lead_sec: float = 6.0,
-                 chapters: bool = True, players: bool = True) -> str:
+                 chapters: bool = True, players: bool = True,
+                 colours: dict | None = None) -> str:
+    """Description text: header + ONE chronological list (periods and
+    baskets) that YouTube turns into chapters: starts at 0:00, entries less
+    than 10 s apart are merged into one line (YouTube's minimum chapter
+    length), + scorers.  One list on purpose: how YouTube treats a second
+    timestamp list in a description is not documented."""
     names = {"home": match["home"], "guest": match["guest"]}
     fin = result.get("final") or {}
     lines = [f"{names['home']} – {names['guest']}  "
-             f"{fin.get('home', '?')}:{fin.get('guest', '?')}", ""]
+             f"{fin.get('home', '?')}:{fin.get('guest', '?')}"]
+    ps = period_scores(result)
+    if len(ps) > 1:
+        lines.append("Kwarty: " + ", ".join(
+            f"{'?' if h is None else h}:{'?' if g is None else g}" for _, h, g in ps))
+    colours = colours or result.get("colours")
+    if colours:
+        lines.append("Stroje: " + ", ".join(
+            f"{names[s]} – {colours[s]['name']}" for s in SIDES if colours.get(s)))
+    lines.append("")
 
+    items: list[tuple[float, int, str]] = []   # (time, order, text)
     if chapters:
-        ch: list[tuple[float, str]] = []
         for p in result.get("periods") or []:
-            t = max(0.0, p["board_t"] - lead_sec)
-            if ch and t - ch[-1][0] < 10:  # YouTube: chapters >= 10 s apart
-                ch[-1] = (ch[-1][0], _period_name(p["period"]))
-                continue
-            ch.append((t, _period_name(p["period"])))
-        if ch and ch[0][0] >= 10:
-            ch.insert(0, (0.0, "Przed meczem"))
-        elif ch:
-            ch[0] = (0.0, ch[0][1])
-        if len(ch) >= 3:
-            lines.append("Rozdziały:")
-            lines += [f"{fmt_ts(t)} {name}" for t, name in ch]
-            lines.append("")
-
-    pts = [e for e in result.get("events") or [] if e["points"] > 0]
-    if pts:
-        lines.append("Punkty:")
-        for e in pts:
-            t = e.get("t", e["board_t"] - lead_sec)
-            who = player_label(e, match) if players else ""
-            lines.append(f"{fmt_ts(t)} {_score(e)} {names[e['team']]} +{e['points']}"
-                         + (f" – {who}" if who else ""))
+            items.append((max(0.0, p["board_t"] - lead_sec), 0,
+                          f"── {_period_name(p['period'])} ──"))
+    for e in result.get("events") or []:
+        if e["points"] <= 0:
+            continue
+        who = player_label(e, match) if players else ""
+        items.append((e.get("t", e["board_t"] - lead_sec), 1,
+                      f"{_score(e)} {names[e['team']]} +{e['points']}"
+                      + (f" · {who}" if who else "")))
+    items.sort()
+    merged: list[list] = []
+    for t, _, text in items:
+        if merged and t - merged[-1][0] < 10:  # YouTube: chapters >= 10 s
+            merged[-1][1] += f" | {text}"
+        else:
+            merged.append([t, text])
+    if merged:
+        if merged[0][0] >= 10:
+            merged.insert(0, [0.0, "Początek nagrania"])
+        else:
+            merged[0][0] = 0.0
+        lines += [f"{fmt_ts(t)} {text}" for t, text in merged]
         lines.append("")
-        if players:
-            lines += scorers_lines(pts, match, names)
+    pts = [e for e in result.get("events") or [] if e["points"] > 0]
+    if players and pts:
+        lines += scorers_lines(pts, match, names)
     return "\n".join(lines).rstrip() + "\n"
 
 

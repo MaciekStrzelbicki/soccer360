@@ -1516,7 +1516,10 @@ function renderStagingInbox() {
           '</label>' +
           (hints.length ? '<div class="inline-tags" style="margin-top:8px">' + hints.map(h => '<span class="tag">' + escapeHtml(h) + '</span>').join('') + '</div>' : '') +
         '</div>' +
-        '<button class="btn secondary" onclick="importStagedFile(' + quoteJs(file.name) + ')">Send To Ingest</button>' +
+        '<div class="toolbar-row" style="gap:6px">' +
+          '<a class="btn secondary" href="/calibrate/' + encodeURIComponent(file.name.replace(/\.[^.]+$/, '')) + '" title="Team names (and venue calibration) before processing">Drużyny</a>' +
+          '<button class="btn secondary" onclick="importStagedFile(' + quoteJs(file.name) + ')">Send To Ingest</button>' +
+        '</div>' +
       '</div>' +
     '</div>';
   }).join('');

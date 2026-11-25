@@ -243,11 +243,35 @@ class TestYoutube:
         txt = scoring.youtube_text(self.RESULT, self.MATCH, lead_sec=6)
         lines = txt.splitlines()
         assert lines[0] == "Tygrysy – Lwy  1:3"
-        assert "0:00 1. kwarta" in lines          # first chapter forced to 0:00
-        assert "14:54 2. kwarta" in lines
+        assert lines[1] == "Kwarty: 2:3, ?:?, ?:?, -1:0" or lines[1].startswith("Kwarty: 2:3")
+        assert "0:00 ── 1. kwarta ──" in lines    # first chapter forced to 0:00
+        assert "14:54 ── 2. kwarta ──" in lines
         assert "2:04 2:0 Tygrysy +2" in lines
         assert "3:14 2:3 Lwy +3" in lines
-        assert not any("-1" in l for l in lines)  # corrections not listed
+        assert not any("-1" in l for l in lines[2:])  # corrections not listed
+        times = [l.split()[0] for l in lines if l[:1].isdigit()]
+        assert times == sorted(times, key=lambda x: [int(v) for v in x.split(":")])
+
+    def test_close_entries_merged_into_one_chapter(self):
+        res = {"final": {"home": 2, "guest": 0}, "periods": [], "events": [
+            {"board_t": 100, "t": 94, "team": "home", "points": 1, "home": 1, "guest": 0},
+            {"board_t": 105, "t": 99, "team": "home", "points": 1, "home": 2, "guest": 0},
+            {"board_t": 200, "t": 194, "team": "home", "points": 2, "home": 4, "guest": 0}]}
+        lines = scoring.youtube_text(res, self.MATCH).splitlines()
+        assert "0:00 Początek nagrania" in lines
+        assert "1:34 1:0 Tygrysy +1 | 2:0 Tygrysy +1" in lines
+        assert "3:14 4:0 Tygrysy +2" in lines
+
+    def test_period_scores_and_colours(self):
+        res = {"start": {"home": 0, "guest": 0}, "periods": [], "events": [
+            {"board_t": 1, "team": "home", "points": 2, "home": 2, "guest": 0, "period": 1},
+            {"board_t": 2, "team": "guest", "points": 3, "home": 2, "guest": 3, "period": 1},
+            {"board_t": 9, "team": "home", "points": 1, "home": 3, "guest": 3, "period": 2}],
+            "final": {"home": 3, "guest": 3},
+            "colours": {"home": {"name": "białe"}, "guest": {"name": "czarne"}}}
+        assert scoring.period_scores(res) == [(1, 2, 3), (2, 1, 0)]
+        txt = scoring.youtube_text(res, self.MATCH)
+        assert "Kwarty: 2:3, 1:0" in txt and "Stroje: Tygrysy – białe, Lwy – czarne" in txt
 
     def test_fmt_ts(self):
         assert scoring.fmt_ts(5) == "0:05"
@@ -256,7 +280,8 @@ class TestYoutube:
 
     def test_few_periods_no_chapters(self):
         res = {**self.RESULT, "periods": [{"board_t": 4.0, "period": 1}]}
-        assert "Rozdziały" not in scoring.youtube_text(res, self.MATCH)
+        assert "kwarta ──" in scoring.youtube_text(res, self.MATCH)
+        assert "kwarta" not in scoring.youtube_text(res, self.MATCH, chapters=False)
 
     def test_write_and_regenerate(self, tmp_path):
         res = json.loads(json.dumps(self.RESULT))

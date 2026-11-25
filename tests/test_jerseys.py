@@ -110,8 +110,8 @@ class TestOutputs:
              "shot": {"number": 11, "number_src": "read_low"}},
         ]}
         txt = scoring.youtube_text(res, self.MATCH)
-        assert "0:07 2:0 Tygrysy +2 – #7 Kowalski" in txt
-        assert "0:17 2:2 Lwy +2 – #4\n" in txt
+        assert "0:00 2:0 Tygrysy +2 · #7 Kowalski" in txt   # first chapter at 0:00
+        assert "0:17 2:2 Lwy +2 · #4\n" in txt
         assert "0:37 6:2 Tygrysy +1\n" in txt          # uncertain number left out
         assert "Strzelcy:\nTygrysy: #7 Kowalski 5\nLwy: #4 2" in txt
         assert "#7" not in scoring.youtube_text(res, self.MATCH, players=False)
@@ -169,7 +169,7 @@ def test_numbers_end_to_end_and_review_api(clip, tmp_path):  # noqa: F811
            "events": [dict(e) for e in events]}
     shots.apply_shots(res, doc)
     scoring.write_outputs(proc, res, scoring.match_info(None), sc)
-    assert "– #23" in (proc / "youtube.txt").read_text()
+    assert "· #23" in (proc / "youtube.txt").read_text()
 
     from fastapi.testclient import TestClient
     from src.dashboard import create_app
@@ -190,7 +190,7 @@ def test_numbers_end_to_end_and_review_api(clip, tmp_path):  # noqa: F811
     v = c.post("/api/scoring/g/roster", json={"home": "4 Kowalski\n#23. Nowak", "guest": ""}).json()
     assert v["match"]["roster"]["home"] == {"4": "Kowalski", "23": "Nowak"}
     yt = (proc / "youtube.txt").read_text()
-    assert "– #4 Kowalski" in yt and "#23 Nowak" in yt
+    assert "· #4 Kowalski" in yt and "#23 Nowak" in yt
     assert "Gospodarze: #23 Nowak 5, #4 Kowalski 2" in yt
     v = c.post("/api/scoring/g/edits", json={"edits": {"7.00": {"clear": ["number"]}}}).json()
     assert v["events"][0]["shot"]["number"] == 23
